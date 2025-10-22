@@ -7,6 +7,7 @@ import os
 import json
 import argparse
 from datetime import datetime
+from typing import Optional
 import numpy as np
 import matplotlib.pyplot as plt
 
@@ -16,8 +17,8 @@ import torch.optim as optim
 from torch.optim.lr_scheduler import ReduceLROnPlateau, CosineAnnealingLR
 from tqdm import tqdm
 
-from dataset import create_data_loaders, ISICSiameseDataset
-from modules import get_model, compute_accuracy, ContrastiveLoss
+from dataset import create_data_loaders, ISICSiameseDataset, ISICTripletDataset
+from modules import get_model, compute_accuracy, ContrastiveLoss, TripletLoss
 import torch.nn.functional as F
 
 
@@ -133,10 +134,14 @@ def train_one_epoch(
     optimizer: optim.Optimizer,
     device: torch.device,
     epoch: int,
-    total_epochs: int
+    total_epochs: int,
+    use_triplet: bool = False
 ) -> tuple:
     """
     Train for one epoch.
+    
+    Args:
+        use_triplet: If True, use triplet loss training
     
     Returns:
         Tuple of (avg_loss, avg_accuracy)
@@ -148,18 +153,46 @@ def train_one_epoch(
     
     pbar = tqdm(train_loader, desc=f'Epoch {epoch}/{total_epochs} [Train]')
     
-    for batch_idx, (img1, img2, labels) in enumerate(pbar):
-        # Move to device
-        img1 = img1.to(device)
-        img2 = img2.to(device)
-        labels = labels.to(device)
-        
-        # Zero gradients
-        optimizer.zero_grad()
-        
-        # Forward pass
-        emb1, emb2 = model(img1, img2)
-        loss = criterion(emb1, emb2, labels)
+    for batch_idx, batch_data in enumerate(pbar):
+        if use_triplet:
+            # Triplet: anchor, positive, negative
+            anchor, positive, negative = batch_data
+            anchor = anchor.to(device)
+            positive = positive.to(device)
+            negative = negative.to(device)
+            
+            # Zero gradients
+            optimizer.zero_grad()
+            
+            # Forward pass
+            anchor_emb = model.get_embedding(anchor)
+            positive_emb = model.get_embedding(positive)
+            negative_emb = model.get_embedding(negative)
+            
+            loss = criterion(anchor_emb, positive_emb, negative_emb)
+            
+            # Compute accuracy (positive distance < negative distance)
+            with torch.no_grad():
+                pos_dist = F.pairwise_distance(anchor_emb, positive_emb)
+                neg_dist = F.pairwise_distance(anchor_emb, negative_emb)
+                accuracy = (pos_dist < neg_dist).float().mean().item()
+        else:
+            # Pair: img1, img2, labels
+            img1, img2, labels = batch_data
+            img1 = img1.to(device)
+            img2 = img2.to(device)
+            labels = labels.to(device)
+            
+            # Zero gradients
+            optimizer.zero_grad()
+            
+            # Forward pass
+            emb1, emb2 = model(img1, img2)
+            loss = criterion(emb1, emb2, labels)
+            
+            # Compute accuracy
+            with torch.no_grad():
+                accuracy = compute_accuracy(emb1, emb2, labels, threshold=0.5)
         
         # Backward pass
         loss.backward()
@@ -168,10 +201,6 @@ def train_one_epoch(
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
         
         optimizer.step()
-        
-        # Compute accuracy
-        with torch.no_grad():
-            accuracy = compute_accuracy(emb1, emb2, labels, threshold=0.5)
         
         # Update metrics
         running_loss += loss.item()
@@ -195,10 +224,14 @@ def validate(
     criterion: nn.Module,
     device: torch.device,
     epoch: int,
-    total_epochs: int
+    total_epochs: int,
+    use_triplet: bool = False
 ) -> tuple:
     """
     Validate the model.
+    
+    Args:
+        use_triplet: If True, use triplet loss validation
     
     Returns:
         Tuple of (avg_loss, avg_accuracy)
@@ -211,18 +244,38 @@ def validate(
     pbar = tqdm(val_loader, desc=f'Epoch {epoch}/{total_epochs} [Val]')
     
     with torch.no_grad():
-        for img1, img2, labels in pbar:
-            # Move to device
-            img1 = img1.to(device)
-            img2 = img2.to(device)
-            labels = labels.to(device)
-            
-            # Forward pass
-            emb1, emb2 = model(img1, img2)
-            loss = criterion(emb1, emb2, labels)
-            
-            # Compute accuracy
-            accuracy = compute_accuracy(emb1, emb2, labels, threshold=0.5)
+        for batch_data in pbar:
+            if use_triplet:
+                # Triplet: anchor, positive, negative
+                anchor, positive, negative = batch_data
+                anchor = anchor.to(device)
+                positive = positive.to(device)
+                negative = negative.to(device)
+                
+                # Forward pass
+                anchor_emb = model.get_embedding(anchor)
+                positive_emb = model.get_embedding(positive)
+                negative_emb = model.get_embedding(negative)
+                
+                loss = criterion(anchor_emb, positive_emb, negative_emb)
+                
+                # Compute accuracy
+                pos_dist = F.pairwise_distance(anchor_emb, positive_emb)
+                neg_dist = F.pairwise_distance(anchor_emb, negative_emb)
+                accuracy = (pos_dist < neg_dist).float().mean().item()
+            else:
+                # Pair: img1, img2, labels
+                img1, img2, labels = batch_data
+                img1 = img1.to(device)
+                img2 = img2.to(device)
+                labels = labels.to(device)
+                
+                # Forward pass
+                emb1, emb2 = model(img1, img2)
+                loss = criterion(emb1, emb2, labels)
+                
+                # Compute accuracy
+                accuracy = compute_accuracy(emb1, emb2, labels, threshold=0.5)
             
             # Update metrics
             running_loss += loss.item()
@@ -316,9 +369,11 @@ def train(
     weight_decay: float = 1e-4,
     val_split: float = 0.2,
     # Class imbalance handling
-    loss_type: str = 'weighted',  # 'standard', 'weighted', 'focal'
+    loss_type: str = 'triplet',  # 'standard', 'weighted', 'focal', 'triplet'
     pos_weight: float = 10.0,
     focal_gamma: float = 2.0,
+    triplet_margin: float = 1.0,
+    samples_per_class: Optional[int] = None,
     # Other settings
     num_workers: int = 4,
     random_seed: int = 42,
@@ -363,6 +418,9 @@ def train(
     print(f"Backbone: {backbone}")
     print(f"Embedding Dimension: {embedding_dim}")
     print(f"Loss Type: {loss_type}")
+    if loss_type == 'triplet':
+        print(f"Triplet Margin: {triplet_margin}")
+        print(f"Using Class-Balanced Triplet Sampling")
     print(f"Batch Size: {batch_size}")
     print(f"Learning Rate: {learning_rate}")
     print(f"Number of Epochs: {num_epochs}")
@@ -370,6 +428,7 @@ def train(
     
     # Create data loaders
     print("Loading data...")
+    use_triplet = (loss_type == 'triplet')
     train_loader, val_loader = create_data_loaders(
         metadata_path=metadata_path,
         img_dir=img_dir,
@@ -377,7 +436,9 @@ def train(
         batch_size=batch_size,
         num_workers=num_workers,
         random_state=random_seed,
-        verbose=True
+        verbose=True,
+        use_triplet=use_triplet,
+        samples_per_class=samples_per_class
     )
     
     # Create model
@@ -422,7 +483,6 @@ def train(
         mode='min',
         factor=0.5,
         patience=5,
-        verbose=True,
         min_lr=1e-7
     )
     
