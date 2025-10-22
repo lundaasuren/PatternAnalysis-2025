@@ -49,8 +49,14 @@ class ISICSiameseDataset(Dataset):
         self.balance_pairs = balance_pairs
         
         # Ensure required columns exist
+        # Handle different column naming conventions
+        if 'isic_id' in self.df.columns and 'image_name' not in self.df.columns:
+            self.df['image_name'] = self.df['isic_id']
+        
         if 'image_name' not in self.df.columns or 'target' not in self.df.columns:
-            raise ValueError("DataFrame must contain 'image_name' and 'target' columns")
+            available_cols = ', '.join(self.df.columns.tolist())
+            raise ValueError(f"DataFrame must contain 'image_name' (or 'isic_id') and 'target' columns. "
+                           f"Available columns: {available_cols}")
         
         # Create label-to-indices mapping for efficient pair generation
         self.label_to_indices = defaultdict(list)
@@ -170,7 +176,20 @@ class ISICSiameseDataset(Dataset):
         if not img_name.endswith(('.jpg', '.jpeg', '.png')):
             img_name = f"{img_name}.jpg"
         
-        img_path = os.path.join(self.img_dir, img_name)
+        # Try multiple possible paths (handle nested image directory)
+        possible_paths = [
+            os.path.join(self.img_dir, img_name),  # Direct path
+            os.path.join(self.img_dir, 'image', img_name),  # Nested in 'image' folder
+        ]
+        
+        img_path = None
+        for path in possible_paths:
+            if os.path.exists(path):
+                img_path = path
+                break
+        
+        if img_path is None:
+            img_path = possible_paths[0]  # Use first path for error message
         
         try:
             image = Image.open(img_path).convert('RGB')
@@ -244,7 +263,12 @@ def load_and_split_data(
     # Load metadata
     df = pd.read_csv(metadata_path)
     
+    # Handle different column naming conventions (ISIC 2020 uses 'isic_id')
+    if 'isic_id' in df.columns and 'image_name' not in df.columns:
+        df['image_name'] = df['isic_id']
+    
     print(f"Loaded metadata: {len(df)} samples")
+    print(f"\nColumns found: {', '.join(df.columns.tolist())}")
     print(f"\nOriginal class distribution:")
     print(df['target'].value_counts())
     print(f"\nClass percentages:")
@@ -313,7 +337,8 @@ def create_data_loaders(
     batch_size: int = 32,
     num_workers: int = 4,
     img_size: int = 224,
-    random_state: int = 42
+    random_state: int = 42,
+    verbose: bool = True
 ) -> Tuple[DataLoader, DataLoader]:
     """
     Create training and validation data loaders from a single metadata file.
@@ -326,6 +351,7 @@ def create_data_loaders(
         num_workers: Number of worker processes
         img_size: Image size
         random_state: Random seed for reproducibility
+        verbose: If True, print detailed statistics
     
     Returns:
         Tuple of (train_loader, val_loader)
@@ -339,9 +365,9 @@ def create_data_loaders(
     )
     
     # Create datasets
-    print("\n" + "="*60)
-    print("Creating Training Dataset:")
-    print("="*60)
+    if verbose:
+        print("\nCreating Training Dataset:")
+        print("-" * 60)
     train_dataset = ISICSiameseDataset(
         df=train_df,
         img_dir=img_dir,
@@ -349,9 +375,9 @@ def create_data_loaders(
         train=True
     )
     
-    print("\n" + "="*60)
-    print("Creating Validation Dataset:")
-    print("="*60)
+    if verbose:
+        print("\nCreating Validation Dataset:")
+        print("-" * 60)
     val_dataset = ISICSiameseDataset(
         df=val_df,
         img_dir=img_dir,
@@ -376,118 +402,45 @@ def create_data_loaders(
         pin_memory=True
     )
     
-    print("\n" + "="*60)
-    print("Data Loaders Created Successfully!")
-    print("="*60)
-    print(f"Train batches per epoch: {len(train_loader)}")
-    print(f"Validation batches: {len(val_loader)}")
+    if verbose:
+        print("\nData Loaders Ready:")
+        print("-" * 60)
+        print(f"Train batches per epoch: {len(train_loader)}")
+        print(f"Validation batches: {len(val_loader)}")
     
     return train_loader, val_loader
 
 
-# Test the dataset loader
 if __name__ == "__main__":
     """
-    Test script to verify the dataset loader works correctly.
+    Simple test to verify the dataset loader works correctly.
+    Usage: python dataset.py
     """
-    import matplotlib.pyplot as plt
-    
     # Example usage - ADJUST THESE PATHS TO YOUR ACTUAL DATA LOCATION
-    metadata_path = "path/to/train-metadata.csv"
-    img_dir = "path/to/train-image"
+    metadata_path = "data/train-metadata.csv"
+    img_dir = "data/train-image"
     
-    print("="*60)
-    print("Testing ISIC 2020 Siamese Dataset Loader")
-    print("="*60)
+    print("Testing ISIC 2020 Siamese Dataset Loader\n")
     
-    # Test data loading and splitting
     try:
         train_loader, val_loader = create_data_loaders(
             metadata_path=metadata_path,
             img_dir=img_dir,
             val_split=0.2,
-            batch_size=8,
-            num_workers=2,
+            batch_size=32,
+            num_workers=4,
             random_state=42
         )
         
-        print("\n" + "="*60)
-        print("Testing Data Loading:")
-        print("="*60)
+        # Quick sanity check
+        img1, img2, labels = next(iter(train_loader))
+        print(f"\n✓ Data loader test passed!")
+        print(f"  Batch shape: {img1.shape}")
+        print(f"  Label distribution in batch: {labels.sum().item()}/{len(labels)} positive pairs")
         
-        # Get a batch from training loader
-        img1_batch, img2_batch, labels_batch = next(iter(train_loader))
-        print(f"Train batch - Image1 shape: {img1_batch.shape}")
-        print(f"Train batch - Image2 shape: {img2_batch.shape}")
-        print(f"Train batch - Labels shape: {labels_batch.shape}")
-        print(f"Train batch - Labels: {labels_batch.tolist()}")
-        
-        # Get a batch from validation loader
-        img1_batch, img2_batch, labels_batch = next(iter(val_loader))
-        print(f"\nVal batch - Image1 shape: {img1_batch.shape}")
-        print(f"Val batch - Image2 shape: {img2_batch.shape}")
-        print(f"Val batch - Labels shape: {labels_batch.shape}")
-        print(f"Val batch - Labels: {labels_batch.tolist()}")
-        
-        # Visualize some pairs
-        print("\n" + "="*60)
-        print("Creating Visualization:")
-        print("="*60)
-        
-        fig, axes = plt.subplots(3, 4, figsize=(12, 9))
-        fig.suptitle('Sample Image Pairs from Siamese Dataset', fontsize=16)
-        
-        for i in range(min(3, len(img1_batch))):
-            img1 = img1_batch[i]
-            img2 = img2_batch[i]
-            label = labels_batch[i]
-            
-            # Denormalize for visualization
-            mean = torch.tensor([0.485, 0.456, 0.406]).view(3, 1, 1)
-            std = torch.tensor([0.229, 0.224, 0.225]).view(3, 1, 1)
-            img1_vis = img1 * std + mean
-            img2_vis = img2 * std + mean
-            
-            # Clip values to [0, 1]
-            img1_vis = torch.clamp(img1_vis, 0, 1)
-            img2_vis = torch.clamp(img2_vis, 0, 1)
-            
-            # Convert to numpy and transpose
-            img1_np = img1_vis.permute(1, 2, 0).numpy()
-            img2_np = img2_vis.permute(1, 2, 0).numpy()
-            
-            # Display
-            axes[i, 0].imshow(img1_np)
-            axes[i, 0].set_title(f'Image 1')
-            axes[i, 0].axis('off')
-            
-            axes[i, 1].imshow(img2_np)
-            axes[i, 1].set_title(f'Image 2')
-            axes[i, 1].axis('off')
-            
-            label_text = 'Similar\n(Same Class)' if label.item() == 1 else 'Dissimilar\n(Diff Class)'
-            axes[i, 2].text(0.5, 0.5, label_text, 
-                           ha='center', va='center', 
-                           fontsize=12, fontweight='bold',
-                           color='green' if label.item() == 1 else 'red')
-            axes[i, 2].axis('off')
-            
-            axes[i, 3].axis('off')
-        
-        plt.tight_layout()
-        plt.savefig('sample_pairs.png', dpi=150, bbox_inches='tight')
-        print("Sample pairs visualization saved as 'sample_pairs.png'")
-        
-        print("\n" + "="*60)
-        print("✓ Dataset loader test completed successfully!")
-        print("="*60)
-        
-    except FileNotFoundError as e:
-        print(f"\n✗ Error: {e}")
-        print("\nPlease update the paths in the test script:")
-        print("  - metadata_path: path to your train-metadata.csv")
-        print("  - img_dir: path to your train-image folder")
     except Exception as e:
-        print(f"\n✗ Unexpected error: {e}")
-        import traceback
-        traceback.print_exc()
+        print(f"✗ Error: {e}")
+        print("\nPlease verify:")
+        print("  - Metadata path is correct")
+        print("  - Image directory is correct")
+        print("  - Required columns exist in CSV")
