@@ -467,6 +467,9 @@ def train(
     elif loss_type == 'focal':
         criterion = FocalContrastiveLoss(margin=1.0, gamma=focal_gamma)
         print(f"  Focal gamma: {focal_gamma}")
+    elif loss_type == 'triplet':
+        criterion = TripletLoss(margin=triplet_margin)
+        print(f"  Triplet margin: {triplet_margin}")
     else:
         raise ValueError(f"Unknown loss type: {loss_type}")
     
@@ -506,12 +509,12 @@ def train(
     for epoch in range(1, num_epochs + 1):
         # Train
         train_loss, train_acc = train_one_epoch(
-            model, train_loader, criterion, optimizer, device, epoch, num_epochs
+            model, train_loader, criterion, optimizer, device, epoch, num_epochs, use_triplet
         )
         
         # Validate
         val_loss, val_acc = validate(
-            model, val_loader, criterion, device, epoch, num_epochs
+            model, val_loader, criterion, device, epoch, num_epochs, use_triplet
         )
         
         # Update learning rate
@@ -606,13 +609,17 @@ if __name__ == "__main__":
                         help='Validation split ratio')
     
     # Class imbalance arguments
-    parser.add_argument('--loss_type', type=str, default='weighted',
-                        choices=['standard', 'weighted', 'focal'],
+    parser.add_argument('--loss_type', type=str, default='triplet',
+                        choices=['standard', 'weighted', 'focal', 'triplet'],
                         help='Type of contrastive loss')
     parser.add_argument('--pos_weight', type=float, default=10.0,
                         help='Weight for positive pairs (weighted loss)')
     parser.add_argument('--focal_gamma', type=float, default=2.0,
                         help='Gamma parameter (focal loss)')
+    parser.add_argument('--triplet_margin', type=float, default=1.0,
+                        help='Margin for triplet loss')
+    parser.add_argument('--samples_per_class', type=int, default=None,
+                        help='Number of samples per class per epoch (for triplet loss)')
     
     # Other arguments
     parser.add_argument('--num_workers', type=int, default=4,
