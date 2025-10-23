@@ -456,21 +456,23 @@ class ISICTripletDataset(Dataset):
 
 def load_and_split_data(
     metadata_path: str,
-    val_split: float = 0.2,
+    val_split: float = 0.1,
+    test_split: float = 0.1,
     random_state: int = 42,
     stratify: bool = True
-) -> Tuple[pd.DataFrame, pd.DataFrame]:
+) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """
-    Load metadata and split into train and validation sets.
+    Load metadata and split into train, validation, and test sets.
     
     Args:
         metadata_path: Path to train-metadata.csv
         val_split: Fraction of data to use for validation (0.0 to 1.0)
+        test_split: Fraction of data to use for testing (0.0 to 1.0)
         random_state: Random seed for reproducibility
         stratify: If True, maintain class distribution in splits
     
     Returns:
-        Tuple of (train_df, val_df)
+        Tuple of (train_df, val_df, test_df)
     """
     # Load metadata
     df = pd.read_csv(metadata_path)
@@ -486,29 +488,47 @@ def load_and_split_data(
     print(f"\nClass percentages:")
     print(df['target'].value_counts(normalize=True) * 100)
     
-    # Split data
+    # First split: separate out test set
+    train_val_size = 1.0 - test_split
     if stratify:
-        train_df, val_df = train_test_split(
+        train_val_df, test_df = train_test_split(
             df,
-            test_size=val_split,
+            test_size=test_split,
             random_state=random_state,
             stratify=df['target']
         )
-    else:
+        # Second split: separate train and validation
+        val_size_adjusted = val_split / train_val_size
         train_df, val_df = train_test_split(
+            train_val_df,
+            test_size=val_size_adjusted,
+            random_state=random_state,
+            stratify=train_val_df['target']
+        )
+    else:
+        train_val_df, test_df = train_test_split(
             df,
-            test_size=val_split,
+            test_size=test_split,
+            random_state=random_state
+        )
+        val_size_adjusted = val_split / train_val_size
+        train_df, val_df = train_test_split(
+            train_val_df,
+            test_size=val_size_adjusted,
             random_state=random_state
         )
     
-    print(f"\nTrain set: {len(train_df)} samples")
-    print(f"Validation set: {len(val_df)} samples")
+    print(f"\nTrain set: {len(train_df)} samples ({len(train_df)/len(df)*100:.1f}%)")
+    print(f"Validation set: {len(val_df)} samples ({len(val_df)/len(df)*100:.1f}%)")
+    print(f"Test set: {len(test_df)} samples ({len(test_df)/len(df)*100:.1f}%)")
     print(f"\nTrain class distribution:")
     print(train_df['target'].value_counts())
     print(f"\nValidation class distribution:")
     print(val_df['target'].value_counts())
+    print(f"\nTest class distribution:")
+    print(test_df['target'].value_counts())
     
-    return train_df, val_df
+    return train_df, val_df, test_df
 
 
 def get_transforms(train: bool = True, img_size: int = 224) -> transforms.Compose:
@@ -545,7 +565,8 @@ def get_transforms(train: bool = True, img_size: int = 224) -> transforms.Compos
 def create_data_loaders(
     metadata_path: str,
     img_dir: str,
-    val_split: float = 0.2,
+    val_split: float = 0.1,
+    test_split: float = 0.1,
     batch_size: int = 32,
     num_workers: int = 4,
     img_size: int = 224,
@@ -553,14 +574,15 @@ def create_data_loaders(
     verbose: bool = True,
     use_triplet: bool = False,
     samples_per_class: Optional[int] = None
-) -> Tuple[DataLoader, DataLoader]:
+) -> Tuple[DataLoader, DataLoader, DataLoader]:
     """
-    Create training and validation data loaders from a single metadata file.
+    Create training, validation, and test data loaders from a single metadata file.
     
     Args:
         metadata_path: Path to train-metadata.csv
         img_dir: Directory with training images (train-image folder)
         val_split: Fraction of data to use for validation
+        test_split: Fraction of data to use for testing
         batch_size: Batch size for data loaders
         num_workers: Number of worker processes
         img_size: Image size
@@ -570,12 +592,13 @@ def create_data_loaders(
         samples_per_class: Number of samples per class (for triplet dataset)
     
     Returns:
-        Tuple of (train_loader, val_loader)
+        Tuple of (train_loader, val_loader, test_loader)
     """
     # Load and split data
-    train_df, val_df = load_and_split_data(
+    train_df, val_df, test_df = load_and_split_data(
         metadata_path=metadata_path,
         val_split=val_split,
+        test_split=test_split,
         random_state=random_state,
         stratify=True
     )
@@ -611,6 +634,17 @@ def create_data_loaders(
         **dataset_kwargs
     )
     
+    if verbose:
+        print(f"\nCreating Test Dataset ({'Triplet' if use_triplet else 'Pair'}):")
+        print("-" * 60)
+    test_dataset = dataset_class(
+        df=test_df,
+        img_dir=img_dir,
+        transform=get_transforms(train=False, img_size=img_size),
+        train=False,
+        **dataset_kwargs
+    )
+    
     # Create data loaders
     train_loader = DataLoader(
         train_dataset,
@@ -628,13 +662,22 @@ def create_data_loaders(
         pin_memory=True
     )
     
+    test_loader = DataLoader(
+        test_dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=num_workers,
+        pin_memory=True
+    )
+    
     if verbose:
         print("\nData Loaders Ready:")
         print("-" * 60)
         print(f"Train batches per epoch: {len(train_loader)}")
         print(f"Validation batches: {len(val_loader)}")
+        print(f"Test batches: {len(test_loader)}")
     
-    return train_loader, val_loader
+    return train_loader, val_loader, test_loader
 
 
 if __name__ == "__main__":
@@ -649,10 +692,11 @@ if __name__ == "__main__":
     print("Testing ISIC 2020 Siamese Dataset Loader\n")
     
     try:
-        train_loader, val_loader = create_data_loaders(
+        train_loader, val_loader, test_loader = create_data_loaders(
             metadata_path=metadata_path,
             img_dir=img_dir,
-            val_split=0.2,
+            val_split=0.1,
+            test_split=0.1,
             batch_size=32,
             num_workers=4,
             random_state=42

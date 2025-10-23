@@ -62,7 +62,7 @@ During inference, we can compare a query image against reference examples from e
      - Batch size: 32-64 pairs
      - Optimizer: Adam with learning rate scheduling
      - Monitor both loss and accuracy metrics
-   - Validation split: 80/20 train/validation
+   - Data split: 80/10/10 train/validation/test
    - Plot training/validation loss and accuracy curves
 
 ### 4. **Evaluation & Prediction** (`predict.py`)

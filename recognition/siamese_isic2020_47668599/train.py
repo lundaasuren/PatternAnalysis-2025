@@ -367,7 +367,7 @@ def train(
     batch_size: int = 32,
     learning_rate: float = 1e-4,
     weight_decay: float = 1e-4,
-    val_split: float = 0.2,
+    val_split: float = 0.1,
     # Class imbalance handling
     loss_type: str = 'triplet',  # 'standard', 'weighted', 'focal', 'triplet'
     pos_weight: float = 10.0,
@@ -429,10 +429,11 @@ def train(
     # Create data loaders
     print("Loading data...")
     use_triplet = (loss_type == 'triplet')
-    train_loader, val_loader = create_data_loaders(
+    train_loader, val_loader, _ = create_data_loaders(  # We don't use test set during training
         metadata_path=metadata_path,
         img_dir=img_dir,
         val_split=val_split,
+        test_split=0.1,  # 10% for test set
         batch_size=batch_size,
         num_workers=num_workers,
         random_state=random_seed,
@@ -605,8 +606,8 @@ if __name__ == "__main__":
                         help='Initial learning rate')
     parser.add_argument('--weight_decay', type=float, default=1e-4,
                         help='Weight decay')
-    parser.add_argument('--val_split', type=float, default=0.2,
-                        help='Validation split ratio')
+    parser.add_argument('--val_split', type=float, default=0.1,
+                        help='Validation split ratio (default: 0.1 for 80:10:10 split)')
     
     # Class imbalance arguments
     parser.add_argument('--loss_type', type=str, default='triplet',
