@@ -404,7 +404,9 @@ def predict(
     method: str = 'centroid',  # 'centroid' or 'knn'
     knn_k: int = 5,
     # Evaluation set selection
-    eval_on_test: bool = False  # If True, evaluate on test set; if False, on validation set
+    eval_on_test: bool = False,  # If True, evaluate on test set; if False, on validation set
+    # Data splitting
+    patient_aware: bool = True  # If True, split by patient_id to prevent data leakage
 ):
     """
     Main prediction and evaluation function.
@@ -456,7 +458,8 @@ def predict(
         val_split=val_split,
         test_split=test_split,
         random_state=random_seed,
-        stratify=True
+        stratify=True,
+        patient_aware=patient_aware
     )
     
     # Choose evaluation set
@@ -595,7 +598,7 @@ if __name__ == "__main__":
     
     # Model hyperparameters (must match training configuration)
     embedding_dim = 256                            # Embedding dimension
-    backbone = 'resnet50'                          # Backbone architecture
+    backbone = 'efficientnet_b0'                   # Backbone architecture
     dropout = 0.5                                  # Dropout rate
     
     # Data parameters
@@ -611,6 +614,9 @@ if __name__ == "__main__":
     
     # Evaluation set selection
     eval_on_test = False                           # If True, evaluate on test set; if False, on validation set
+    
+    # Data splitting
+    patient_aware = True                           # Split by patient_id (prevents data leakage)
     
     # ==========================================================================
     # Run prediction and evaluation with the above configuration
@@ -630,6 +636,7 @@ if __name__ == "__main__":
         random_seed=random_seed,
         method=method,
         knn_k=knn_k,
-        eval_on_test=eval_on_test
+        eval_on_test=eval_on_test,
+        patient_aware=patient_aware
     )
 

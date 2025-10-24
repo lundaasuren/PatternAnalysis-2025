@@ -459,10 +459,15 @@ def load_and_split_data(
     val_split: float = 0.1,
     test_split: float = 0.1,
     random_state: int = 42,
-    stratify: bool = True
+    stratify: bool = True,
+    patient_aware: bool = True
 ) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """
     Load metadata and split into train, validation, and test sets.
+    
+    IMPORTANT: Uses patient-aware splitting to prevent data leakage.
+    When patient_aware=True, splits by patient_id to ensure no patient
+    appears in multiple splits (train/val/test).
     
     Args:
         metadata_path: Path to train-metadata.csv
@@ -470,6 +475,7 @@ def load_and_split_data(
         test_split: Fraction of data to use for testing (0.0 to 1.0)
         random_state: Random seed for reproducibility
         stratify: If True, maintain class distribution in splits
+        patient_aware: If True, split by patient_id (no patient in multiple splits)
     
     Returns:
         Tuple of (train_df, val_df, test_df)
@@ -488,39 +494,156 @@ def load_and_split_data(
     print(f"\nClass percentages:")
     print(df['target'].value_counts(normalize=True) * 100)
     
-    # First split: separate out test set
-    train_val_size = 1.0 - test_split
-    if stratify:
-        train_val_df, test_df = train_test_split(
-            df,
-            test_size=test_split,
-            random_state=random_state,
-            stratify=df['target']
-        )
-        # Second split: separate train and validation
-        val_size_adjusted = val_split / train_val_size
-        train_df, val_df = train_test_split(
-            train_val_df,
-            test_size=val_size_adjusted,
-            random_state=random_state,
-            stratify=train_val_df['target']
-        )
-    else:
-        train_val_df, test_df = train_test_split(
-            df,
-            test_size=test_split,
-            random_state=random_state
-        )
-        val_size_adjusted = val_split / train_val_size
-        train_df, val_df = train_test_split(
-            train_val_df,
-            test_size=val_size_adjusted,
-            random_state=random_state
-        )
+    # Check if patient_id column exists
+    has_patient_id = 'patient_id' in df.columns
     
-    print(f"\nTrain set: {len(train_df)} samples ({len(train_df)/len(df)*100:.1f}%)")
-    print(f"Validation set: {len(val_df)} samples ({len(val_df)/len(df)*100:.1f}%)")
-    print(f"Test set: {len(test_df)} samples ({len(test_df)/len(df)*100:.1f}%)")
+    if patient_aware and has_patient_id:
+        print(f"\n{'='*70}")
+        print("PATIENT-AWARE SPLITTING ENABLED")
+        print("Splitting by patient_id to prevent data leakage")
+        print(f"{'='*70}")
+        
+        # Get unique patients and their majority class
+        patient_info = df.groupby('patient_id').agg({
+            'target': lambda x: x.mode()[0] if len(x.mode()) > 0 else x.iloc[0],  # Majority class
+            'image_name': 'count'  # Number of images per patient
+        }).reset_index()
+        patient_info.columns = ['patient_id', 'majority_class', 'num_images']
+        
+        print(f"\nTotal patients: {len(patient_info)}")
+        print(f"Total images: {len(df)}")
+        print(f"Average images per patient: {len(df)/len(patient_info):.2f}")
+        print(f"\nPatient class distribution:")
+        print(patient_info['majority_class'].value_counts())
+        
+        # First split: separate out test patients
+        train_val_size = 1.0 - test_split
+        if stratify:
+            train_val_patients, test_patients = train_test_split(
+                patient_info,
+                test_size=test_split,
+                random_state=random_state,
+                stratify=patient_info['majority_class']
+            )
+            # Second split: separate train and validation patients
+            val_size_adjusted = val_split / train_val_size
+            train_patients, val_patients = train_test_split(
+                train_val_patients,
+                test_size=val_size_adjusted,
+                random_state=random_state,
+                stratify=train_val_patients['majority_class']
+            )
+        else:
+            train_val_patients, test_patients = train_test_split(
+                patient_info,
+                test_size=test_split,
+                random_state=random_state
+            )
+            val_size_adjusted = val_split / train_val_size
+            train_patients, val_patients = train_test_split(
+                train_val_patients,
+                test_size=val_size_adjusted,
+                random_state=random_state
+            )
+        
+        # Get all images for each patient set
+        train_df = df[df['patient_id'].isin(train_patients['patient_id'])].copy()
+        val_df = df[df['patient_id'].isin(val_patients['patient_id'])].copy()
+        test_df = df[df['patient_id'].isin(test_patients['patient_id'])].copy()
+        
+        # Verify no patient overlap
+        train_patient_set = set(train_df['patient_id'].unique())
+        val_patient_set = set(val_df['patient_id'].unique())
+        test_patient_set = set(test_df['patient_id'].unique())
+        
+        assert len(train_patient_set & val_patient_set) == 0, "Patient overlap between train and val!"
+        assert len(train_patient_set & test_patient_set) == 0, "Patient overlap between train and test!"
+        assert len(val_patient_set & test_patient_set) == 0, "Patient overlap between val and test!"
+        
+        print(f"\n✓ Patient-aware split successful - no patient overlap detected")
+        print(f"\nTrain set: {len(train_patients)} patients, {len(train_df)} images ({len(train_df)/len(df)*100:.1f}%)")
+        print(f"Validation set: {len(val_patients)} patients, {len(val_df)} images ({len(val_df)/len(df)*100:.1f}%)")
+        print(f"Test set: {len(test_patients)} patients, {len(test_df)} images ({len(test_df)/len(df)*100:.1f}%)")
+        
+    elif patient_aware and not has_patient_id:
+        print(f"\n{'!'*70}")
+        print("WARNING: patient_aware=True but no 'patient_id' column found!")
+        print("Falling back to standard image-level splitting.")
+        print("This may result in data leakage if multiple images are from same patient.")
+        print(f"{'!'*70}\n")
+        
+        # Fall back to standard image-level splitting
+        train_val_size = 1.0 - test_split
+        if stratify:
+            train_val_df, test_df = train_test_split(
+                df,
+                test_size=test_split,
+                random_state=random_state,
+                stratify=df['target']
+            )
+            val_size_adjusted = val_split / train_val_size
+            train_df, val_df = train_test_split(
+                train_val_df,
+                test_size=val_size_adjusted,
+                random_state=random_state,
+                stratify=train_val_df['target']
+            )
+        else:
+            train_val_df, test_df = train_test_split(
+                df,
+                test_size=test_split,
+                random_state=random_state
+            )
+            val_size_adjusted = val_split / train_val_size
+            train_df, val_df = train_test_split(
+                train_val_df,
+                test_size=val_size_adjusted,
+                random_state=random_state
+            )
+        
+        print(f"\nTrain set: {len(train_df)} samples ({len(train_df)/len(df)*100:.1f}%)")
+        print(f"Validation set: {len(val_df)} samples ({len(val_df)/len(df)*100:.1f}%)")
+        print(f"Test set: {len(test_df)} samples ({len(test_df)/len(df)*100:.1f}%)")
+    
+    else:
+        # Standard image-level splitting (patient_aware=False)
+        print(f"\n{'='*70}")
+        print("STANDARD IMAGE-LEVEL SPLITTING")
+        print(f"{'='*70}")
+        
+        train_val_size = 1.0 - test_split
+        if stratify:
+            train_val_df, test_df = train_test_split(
+                df,
+                test_size=test_split,
+                random_state=random_state,
+                stratify=df['target']
+            )
+            val_size_adjusted = val_split / train_val_size
+            train_df, val_df = train_test_split(
+                train_val_df,
+                test_size=val_size_adjusted,
+                random_state=random_state,
+                stratify=train_val_df['target']
+            )
+        else:
+            train_val_df, test_df = train_test_split(
+                df,
+                test_size=test_split,
+                random_state=random_state
+            )
+            val_size_adjusted = val_split / train_val_size
+            train_df, val_df = train_test_split(
+                train_val_df,
+                test_size=val_size_adjusted,
+                random_state=random_state
+            )
+        
+        print(f"\nTrain set: {len(train_df)} samples ({len(train_df)/len(df)*100:.1f}%)")
+        print(f"Validation set: {len(val_df)} samples ({len(val_df)/len(df)*100:.1f}%)")
+        print(f"Test set: {len(test_df)} samples ({len(test_df)/len(df)*100:.1f}%)")
+    
+    # Print class distributions for all splits
     print(f"\nTrain class distribution:")
     print(train_df['target'].value_counts())
     print(f"\nValidation class distribution:")
@@ -531,12 +654,150 @@ def load_and_split_data(
     return train_df, val_df, test_df
 
 
+def undersample_training_only(
+    train_df: pd.DataFrame,
+    random_state: int = 42,
+    patient_aware: bool = True,
+    target_ratio: float = 1.0
+) -> pd.DataFrame:
+    """
+    ⚠️ CRITICAL: Undersample ONLY the training set to handle class imbalance.
+    
+    This is a best practice for medical ML:
+    - Balance training data so model learns both classes equally
+    - Keep val/test imbalanced to reflect real-world distribution
+    - Prevents inflated metrics that don't generalize
+    
+    Args:
+        train_df: Training DataFrame (ONLY training, not val/test)
+        random_state: Random seed for reproducibility
+        patient_aware: If True, undersample at patient level (recommended)
+        target_ratio: Target ratio of minority to majority class (1.0 = balanced)
+    
+    Returns:
+        Undersampled training DataFrame
+    """
+    print(f"\n{'='*70}")
+    print("TRAINING-ONLY UNDERSAMPLING")
+    print(f"{'='*70}")
+    print("⚠️  Undersampling ONLY training set (val/test remain imbalanced)")
+    print("✓  This ensures realistic evaluation on real-world distribution")
+    
+    # Get class counts
+    class_counts = train_df['target'].value_counts().sort_index()
+    print(f"\nOriginal training set distribution:")
+    for cls, count in class_counts.items():
+        print(f"  Class {cls}: {count} samples ({count/len(train_df)*100:.2f}%)")
+    
+    # Identify majority and minority classes
+    minority_class = class_counts.idxmin()
+    majority_class = class_counts.idxmax()
+    minority_count = class_counts.min()
+    majority_count = class_counts.max()
+    
+    print(f"\nMinority class: {minority_class} ({minority_count} samples)")
+    print(f"Majority class: {majority_class} ({majority_count} samples)")
+    
+    # Calculate target count for majority class
+    target_majority_count = int(minority_count / target_ratio)
+    print(f"Target majority class count: {target_majority_count} (ratio {target_ratio}:1)")
+    
+    has_patient_id = 'patient_id' in train_df.columns
+    
+    if patient_aware and has_patient_id:
+        print(f"\nUsing PATIENT-LEVEL undersampling (prevents data leakage)")
+        
+        # First, determine each patient's class by majority voting
+        patient_classes = train_df.groupby('patient_id')['target'].agg(
+            lambda x: x.mode()[0] if len(x.mode()) > 0 else x.iloc[0]
+        ).reset_index()
+        patient_classes.columns = ['patient_id', 'patient_class']
+        
+        # Split patients by class
+        minority_patient_df = patient_classes[patient_classes['patient_class'] == minority_class]
+        majority_patient_df = patient_classes[patient_classes['patient_class'] == majority_class]
+        
+        minority_patients = minority_patient_df['patient_id'].values
+        majority_patients = majority_patient_df['patient_id'].values
+        
+        print(f"  Minority class: {len(minority_patients)} patients")
+        print(f"  Majority class: {len(majority_patients)} patients")
+        
+        # Count images per patient for estimation
+        minority_image_count = len(train_df[train_df['patient_id'].isin(minority_patients)])
+        majority_image_count = len(train_df[train_df['patient_id'].isin(majority_patients)])
+        
+        print(f"    Minority images: {minority_image_count}")
+        print(f"    Majority images: {majority_image_count}")
+        
+        # Undersample majority class patients
+        np.random.seed(random_state)
+        
+        # Calculate how many majority patients we need
+        avg_images_per_majority_patient = majority_image_count / len(majority_patients) if len(majority_patients) > 0 else 1
+        
+        # Estimate patients needed to reach target ratio
+        target_majority_patients = max(1, int(target_majority_count / avg_images_per_majority_patient))
+        target_majority_patients = min(target_majority_patients, len(majority_patients))
+        
+        sampled_majority_patients = np.random.choice(
+            majority_patients,
+            size=target_majority_patients,
+            replace=False
+        )
+        
+        print(f"  Sampled {len(sampled_majority_patients)} majority patients (out of {len(majority_patients)})")
+        
+        # Combine minority (all) and sampled majority patients
+        # Get ALL images for selected patients
+        minority_data = train_df[train_df['patient_id'].isin(minority_patients)]
+        majority_data = train_df[train_df['patient_id'].isin(sampled_majority_patients)]
+        
+        undersampled_df = pd.concat([minority_data, majority_data], ignore_index=True)
+        
+    else:
+        if patient_aware and not has_patient_id:
+            print(f"\n⚠️  WARNING: patient_aware=True but no patient_id column found")
+            print(f"   Using IMAGE-LEVEL undersampling (may have data leakage)")
+        else:
+            print(f"\nUsing IMAGE-LEVEL undersampling")
+        
+        # Image-level undersampling
+        minority_data = train_df[train_df['target'] == minority_class]
+        majority_data = train_df[train_df['target'] == majority_class]
+        
+        # Randomly sample from majority class
+        np.random.seed(random_state)
+        majority_sampled = majority_data.sample(n=target_majority_count, replace=False, random_state=random_state)
+        
+        # Combine
+        undersampled_df = pd.concat([minority_data, majority_sampled], ignore_index=True)
+    
+    # Shuffle the undersampled data
+    undersampled_df = undersampled_df.sample(frac=1, random_state=random_state).reset_index(drop=True)
+    
+    # Print results
+    final_counts = undersampled_df['target'].value_counts().sort_index()
+    print(f"\nUndersampled training set distribution:")
+    for cls, count in final_counts.items():
+        print(f"  Class {cls}: {count} samples ({count/len(undersampled_df)*100:.2f}%)")
+    
+    print(f"\nReduction: {len(train_df)} → {len(undersampled_df)} samples ({len(undersampled_df)/len(train_df)*100:.1f}%)")
+    print(f"✓ Training set balanced, val/test remain imbalanced for realistic evaluation")
+    print(f"{'='*70}\n")
+    
+    return undersampled_df
+
+
 def get_transforms(train: bool = True, img_size: int = 224) -> transforms.Compose:
     """
     Get image transforms for training or validation.
     
+    Training augmentation uses ONLY geometric transforms (no color augmentation).
+    This preserves color information which is critical for melanoma detection.
+    
     Args:
-        train: If True, include data augmentation
+        train: If True, include geometric data augmentation
         img_size: Target image size
     
     Returns:
@@ -548,7 +809,6 @@ def get_transforms(train: bool = True, img_size: int = 224) -> transforms.Compos
             transforms.RandomHorizontalFlip(p=0.5),
             transforms.RandomVerticalFlip(p=0.5),
             transforms.RandomRotation(20),
-            transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1),
             transforms.ToTensor(),
             transforms.Normalize(mean=[0.485, 0.456, 0.406], 
                                std=[0.229, 0.224, 0.225])  # ImageNet stats
@@ -573,10 +833,16 @@ def create_data_loaders(
     random_state: int = 42,
     verbose: bool = True,
     use_triplet: bool = False,
-    samples_per_class: Optional[int] = None
+    samples_per_class: Optional[int] = None,
+    patient_aware: bool = True,
+    undersample_training: bool = True,
+    target_ratio: float = 1.0
 ) -> Tuple[DataLoader, DataLoader, DataLoader]:
     """
     Create training, validation, and test data loaders from a single metadata file.
+    
+    ⚠️ CRITICAL: When undersample_training=True, ONLY the training set is balanced.
+    Validation and test sets remain imbalanced to reflect real-world distribution.
     
     Args:
         metadata_path: Path to train-metadata.csv
@@ -590,6 +856,9 @@ def create_data_loaders(
         verbose: If True, print detailed statistics
         use_triplet: If True, use triplet dataset instead of pair dataset
         samples_per_class: Number of samples per class (for triplet dataset)
+        patient_aware: If True, split by patient_id to prevent data leakage
+        undersample_training: If True, balance ONLY training set (CRITICAL for medical ML)
+        target_ratio: Target ratio for undersampling (1.0 = balanced, 0.5 = 2:1)
     
     Returns:
         Tuple of (train_loader, val_loader, test_loader)
@@ -600,8 +869,21 @@ def create_data_loaders(
         val_split=val_split,
         test_split=test_split,
         random_state=random_state,
-        stratify=True
+        stratify=True,
+        patient_aware=patient_aware
     )
+    
+    # ⚠️ CRITICAL: Undersample ONLY training set (val/test remain imbalanced)
+    if undersample_training:
+        train_df = undersample_training_only(
+            train_df=train_df,
+            random_state=random_state,
+            patient_aware=patient_aware,
+            target_ratio=target_ratio
+        )
+    else:
+        print(f"\n⚠️  WARNING: Training on imbalanced data (98:2 ratio)")
+        print(f"   Consider setting undersample_training=True for better results\n")
     
     # Choose dataset type
     if use_triplet:

@@ -367,17 +367,27 @@ def train(
     learning_rate: float = 1e-4,
     weight_decay: float = 1e-4,
     val_split: float = 0.1,
+    # Learning rate scheduling
+    lr_scheduler: str = 'ReduceLROnPlateau',
+    lr_factor: float = 0.1,
+    lr_patience: int = 5,
+    lr_min: float = 1e-7,
+    lr_warmup_epochs: int = 3,
+    lr_warmup_start: float = 1e-6,
     # Class imbalance handling
     loss_type: str = 'triplet',  # 'standard', 'weighted', 'focal', 'triplet'
     pos_weight: float = 10.0,
     focal_gamma: float = 2.0,
     triplet_margin: float = 1.0,
     samples_per_class: Optional[int] = 1000,
+    undersample_training: bool = True,
+    target_ratio: float = 1.0,
     # Other settings
     num_workers: int = 4,
     random_seed: int = 42,
     save_every: int = 5,
-    early_stopping_patience: int = 10
+    early_stopping_patience: int = 10,
+    patient_aware: bool = True
 ):
     """
     Main training function.
@@ -395,15 +405,24 @@ def train(
         learning_rate: Initial learning rate
         weight_decay: Weight decay for optimizer
         val_split: Validation split ratio
+        lr_scheduler: Learning rate scheduler type
+        lr_factor: Factor to reduce LR on plateau (0.1 = aggressive)
+        lr_patience: Epochs to wait before reducing LR
+        lr_min: Minimum learning rate
+        lr_warmup_epochs: Number of epochs for warmup (gradual LR increase)
+        lr_warmup_start: Starting LR for warmup phase
         loss_type: Type of loss ('standard', 'weighted', 'focal', 'triplet')
         pos_weight: Weight for positive pairs (weighted loss)
         focal_gamma: Gamma parameter (focal loss)
         triplet_margin: Margin for triplet loss
         samples_per_class: Number of samples per class per epoch (for triplet loss)
+        undersample_training: If True, balance ONLY training set (CRITICAL)
+        target_ratio: Target ratio for undersampling (1.0 = balanced)
         num_workers: Number of data loading workers
         random_seed: Random seed
         save_every: Save checkpoint every N epochs
         early_stopping_patience: Stop training if no improvement for N epochs
+        patient_aware: If True, split by patient_id to prevent data leakage
     """
     # Set random seed for reproducibility
     torch.manual_seed(random_seed)
@@ -442,7 +461,10 @@ def train(
         random_state=random_seed,
         verbose=True,
         use_triplet=use_triplet,
-        samples_per_class=samples_per_class
+        samples_per_class=samples_per_class,
+        patient_aware=patient_aware,
+        undersample_training=undersample_training,
+        target_ratio=target_ratio
     )
     
     # Create model
@@ -485,13 +507,36 @@ def train(
     )
     
     # Create learning rate scheduler
-    scheduler = ReduceLROnPlateau(
-        optimizer,
-        mode='min',
-        factor=0.5,
-        patience=5,
-        min_lr=1e-7
-    )
+    print(f"\nCreating learning rate scheduler...")
+    print(f"  Type: {lr_scheduler}")
+    print(f"  Initial LR: {learning_rate:.2e}")
+    
+    if lr_warmup_epochs > 0:
+        print(f"  Warmup: {lr_warmup_epochs} epochs ({lr_warmup_start:.2e} → {learning_rate:.2e})")
+    
+    print(f"  Factor: {lr_factor} (LR will be multiplied by this on plateau)")
+    print(f"  Patience: {lr_patience} epochs")
+    print(f"  Min LR: {lr_min:.2e}")
+    
+    if lr_scheduler == 'ReduceLROnPlateau':
+        scheduler = ReduceLROnPlateau(
+            optimizer,
+            mode='min',
+            factor=lr_factor,
+            patience=lr_patience,
+            min_lr=lr_min,
+            verbose=True
+        )
+    else:
+        raise ValueError(f"Unsupported scheduler: {lr_scheduler}")
+    
+    # Calculate warmup schedule
+    def get_warmup_lr(epoch: int) -> float:
+        """Calculate learning rate for warmup phase."""
+        if epoch >= lr_warmup_epochs:
+            return learning_rate
+        # Linear warmup from lr_warmup_start to learning_rate
+        return lr_warmup_start + (learning_rate - lr_warmup_start) * (epoch / lr_warmup_epochs)
     
     # Training history
     history = {
@@ -514,6 +559,13 @@ def train(
     print(f"{'='*70}\n")
     
     for epoch in range(1, num_epochs + 1):
+        # Apply warmup learning rate (overrides scheduler during warmup phase)
+        if epoch <= lr_warmup_epochs:
+            warmup_lr = get_warmup_lr(epoch - 1)  # epoch-1 because we use 0-indexing
+            for param_group in optimizer.param_groups:
+                param_group['lr'] = warmup_lr
+            print(f"Warmup Phase: Epoch {epoch}/{lr_warmup_epochs}, LR = {warmup_lr:.2e}")
+        
         # Train
         train_loss, train_acc = train_one_epoch(
             model, train_loader, criterion, optimizer, device, epoch, num_epochs, use_triplet
@@ -524,8 +576,9 @@ def train(
             model, val_loader, criterion, device, epoch, num_epochs, use_triplet
         )
         
-        # Update learning rate
-        scheduler.step(val_loss)
+        # Update learning rate (only after warmup phase)
+        if epoch > lr_warmup_epochs:
+            scheduler.step(val_loss)
         current_lr = optimizer.param_groups[0]['lr']
         
         # Update history
@@ -606,29 +659,40 @@ if __name__ == "__main__":
     
     # Model hyperparameters
     embedding_dim = 256                            # Embedding dimension
-    backbone = 'resnet50'                          # Backbone: 'resnet50', 'resnet34', 'efficientnet_b0'
+    backbone = 'efficientnet_b0'                   # Backbone: 'resnet50', 'resnet34', 'efficientnet_b0'
     pretrained = True                              # Use pretrained ImageNet weights
-    dropout = 0.5                                  # Dropout rate
+    dropout = 0.4                                  # Dropout rate
     
     # Training hyperparameters
-    num_epochs = 30                                # Number of training epochs
-    batch_size = 64                                # Batch size
+    num_epochs = 50                                # Number of training epochs
+    batch_size = 32                                # Batch size
     learning_rate = 1e-4                           # Initial learning rate
     weight_decay = 1e-4                            # Weight decay for optimizer
     val_split = 0.1                                # Validation split ratio (0.1 = 10%)
+    
+    # Learning rate scheduling
+    lr_scheduler = 'ReduceLROnPlateau'             # Use LR scheduler to reduce learning rate on plateau
+    lr_factor = 0.1                                # Aggressive reduction factor (0.1 = 10x reduction)
+    lr_patience = 5                                # Patience of 5 epochs before reducing LR
+    lr_min = 1e-7                                  # Minimum learning rate
+    lr_warmup_epochs = 3                           # Warmup for 3 epochs (gradual LR increase)
+    lr_warmup_start = 1e-6                         # Start warmup from very low LR
     
     # Class imbalance handling
     loss_type = 'triplet'                          # Loss type: 'standard', 'weighted', 'focal', 'triplet'
     pos_weight = 10.0                              # Weight for positive pairs (weighted loss only)
     focal_gamma = 2.0                              # Gamma parameter (focal loss only)
-    triplet_margin = 1.0                           # Margin for triplet loss
+    triplet_margin = 0.5                           # Margin for triplet loss
     samples_per_class = 1000                       # Samples per class per epoch (triplet loss)
+    undersample_training = True                    # ⚠️ CRITICAL: Balance ONLY training set (val/test remain imbalanced)
+    target_ratio = 1.0                             # Target ratio for undersampling (1.0 = balanced 1:1)
     
     # Other settings
-    num_workers = 4                                # Number of data loading workers
+    num_workers = 1                                # Number of data loading workers
     random_seed = 42                               # Random seed for reproducibility
     save_every = 5                                 # Save checkpoint every N epochs
     early_stopping_patience = 10                   # Stop if no improvement for N epochs
+    patient_aware = True                           # Split by patient_id (prevents data leakage)
     
     # ==========================================================================
     # Run training with the above configuration
@@ -646,13 +710,22 @@ if __name__ == "__main__":
         learning_rate=learning_rate,
         weight_decay=weight_decay,
         val_split=val_split,
+        lr_scheduler=lr_scheduler,
+        lr_factor=lr_factor,
+        lr_patience=lr_patience,
+        lr_min=lr_min,
+        lr_warmup_epochs=lr_warmup_epochs,
+        lr_warmup_start=lr_warmup_start,
         loss_type=loss_type,
         pos_weight=pos_weight,
         focal_gamma=focal_gamma,
         triplet_margin=triplet_margin,
         samples_per_class=samples_per_class,
+        undersample_training=undersample_training,
+        target_ratio=target_ratio,
         num_workers=num_workers,
         random_seed=random_seed,
         save_every=save_every,
-        early_stopping_patience=early_stopping_patience
+        early_stopping_patience=early_stopping_patience,
+        patient_aware=patient_aware
     )
