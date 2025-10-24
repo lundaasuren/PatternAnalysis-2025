@@ -7,6 +7,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torchvision import models
+from torchvision.models import ResNet50_Weights, ResNet34_Weights, EfficientNet_B0_Weights
 from typing import Tuple, Optional
 
 
@@ -37,18 +38,21 @@ class EmbeddingNetwork(nn.Module):
         
         # Load pretrained backbone
         if backbone == 'resnet50':
-            self.backbone = models.resnet50(pretrained=pretrained)
+            weights = ResNet50_Weights.DEFAULT if pretrained else None
+            self.backbone = models.resnet50(weights=weights)
             backbone_out_features = self.backbone.fc.in_features
             # Remove the final classification layer
             self.backbone.fc = nn.Identity()
             
         elif backbone == 'resnet34':
-            self.backbone = models.resnet34(pretrained=pretrained)
+            weights = ResNet34_Weights.DEFAULT if pretrained else None
+            self.backbone = models.resnet34(weights=weights)
             backbone_out_features = self.backbone.fc.in_features
             self.backbone.fc = nn.Identity()
             
         elif backbone == 'efficientnet_b0':
-            self.backbone = models.efficientnet_b0(pretrained=pretrained)
+            weights = EfficientNet_B0_Weights.DEFAULT if pretrained else None
+            self.backbone = models.efficientnet_b0(weights=weights)
             backbone_out_features = self.backbone.classifier[1].in_features
             self.backbone.classifier = nn.Identity()
             
