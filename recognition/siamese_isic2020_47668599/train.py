@@ -5,7 +5,6 @@ Includes strategies for handling severe class imbalance (98% benign, 2% melanoma
 
 import os
 import json
-import argparse
 from datetime import datetime
 from typing import Optional
 import numpy as np
@@ -363,8 +362,8 @@ def train(
     pretrained: bool = True,
     dropout: float = 0.5,
     # Training hyperparameters
-    num_epochs: int = 50,
-    batch_size: int = 32,
+    num_epochs: int = 30,
+    batch_size: int = 64,
     learning_rate: float = 1e-4,
     weight_decay: float = 1e-4,
     val_split: float = 0.1,
@@ -373,11 +372,12 @@ def train(
     pos_weight: float = 10.0,
     focal_gamma: float = 2.0,
     triplet_margin: float = 1.0,
-    samples_per_class: Optional[int] = None,
+    samples_per_class: Optional[int] = 1000,
     # Other settings
     num_workers: int = 4,
     random_seed: int = 42,
-    save_every: int = 5
+    save_every: int = 5,
+    early_stopping_patience: int = 10
 ):
     """
     Main training function.
@@ -395,12 +395,15 @@ def train(
         learning_rate: Initial learning rate
         weight_decay: Weight decay for optimizer
         val_split: Validation split ratio
-        loss_type: Type of loss ('standard', 'weighted', 'focal')
+        loss_type: Type of loss ('standard', 'weighted', 'focal', 'triplet')
         pos_weight: Weight for positive pairs (weighted loss)
         focal_gamma: Gamma parameter (focal loss)
+        triplet_margin: Margin for triplet loss
+        samples_per_class: Number of samples per class per epoch (for triplet loss)
         num_workers: Number of data loading workers
         random_seed: Random seed
         save_every: Save checkpoint every N epochs
+        early_stopping_patience: Stop training if no improvement for N epochs
     """
     # Set random seed for reproducibility
     torch.manual_seed(random_seed)
@@ -502,9 +505,12 @@ def train(
     # Training loop
     best_val_loss = float('inf')
     best_val_acc = 0.0
+    epochs_without_improvement = 0
     
     print(f"\n{'='*70}")
     print(f"Starting Training")
+    print(f"{'='*70}")
+    print(f"Early Stopping Patience: {early_stopping_patience} epochs")
     print(f"{'='*70}\n")
     
     for epoch in range(1, num_epochs + 1):
@@ -539,9 +545,13 @@ def train(
         if val_loss < best_val_loss:
             best_val_loss = val_loss
             best_val_acc = val_acc
+            epochs_without_improvement = 0
             save_path = os.path.join(output_dir, 'best_model.pth')
             torch.save(model.state_dict(), save_path)
             print(f"  ✓ New best model saved! (Val Loss: {val_loss:.4f})")
+        else:
+            epochs_without_improvement += 1
+            print(f"  No improvement for {epochs_without_improvement} epoch(s)")
         
         # Save checkpoint periodically
         if epoch % save_every == 0:
@@ -549,6 +559,14 @@ def train(
             save_checkpoint(model, optimizer, scheduler, epoch, best_val_loss, history, checkpoint_path)
         
         print(f"{'-'*70}\n")
+        
+        # Early stopping check
+        if epochs_without_improvement >= early_stopping_patience:
+            print(f"\n{'='*70}")
+            print(f"Early stopping triggered after {epoch} epochs")
+            print(f"No improvement in validation loss for {early_stopping_patience} consecutive epochs")
+            print(f"{'='*70}\n")
+            break
     
     # Save final model
     final_model_path = os.path.join(output_dir, 'final_model.pth')
@@ -576,61 +594,65 @@ def train(
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description='Train Siamese Network for Melanoma Classification')
+    # ==========================================================================
+    # TRAINING CONFIGURATION
+    # Edit these parameters to configure training without command-line arguments
+    # ==========================================================================
     
-    # Data arguments
-    parser.add_argument('--metadata_path', type=str, default='data/train-metadata.csv',
-                        help='Path to train-metadata.csv')
-    parser.add_argument('--img_dir', type=str, default='data/train-image',
-                        help='Path to image directory')
-    parser.add_argument('--output_dir', type=str, default='outputs',
-                        help='Directory to save outputs')
+    # Data paths
+    metadata_path = 'data/train-metadata.csv'      # Path to train-metadata.csv
+    img_dir = 'data/train-image'                   # Path to image directory
+    output_dir = 'outputs'                         # Directory to save outputs
     
-    # Model arguments
-    parser.add_argument('--embedding_dim', type=int, default=256,
-                        help='Embedding dimension')
-    parser.add_argument('--backbone', type=str, default='resnet50',
-                        choices=['resnet50', 'resnet34', 'efficientnet_b0'],
-                        help='Backbone architecture')
-    parser.add_argument('--pretrained', action='store_true', default=True,
-                        help='Use pretrained weights')
-    parser.add_argument('--dropout', type=float, default=0.5,
-                        help='Dropout rate')
+    # Model hyperparameters
+    embedding_dim = 256                            # Embedding dimension
+    backbone = 'resnet50'                          # Backbone: 'resnet50', 'resnet34', 'efficientnet_b0'
+    pretrained = True                              # Use pretrained ImageNet weights
+    dropout = 0.5                                  # Dropout rate
     
-    # Training arguments
-    parser.add_argument('--num_epochs', type=int, default=50,
-                        help='Number of training epochs')
-    parser.add_argument('--batch_size', type=int, default=32,
-                        help='Batch size')
-    parser.add_argument('--learning_rate', type=float, default=1e-4,
-                        help='Initial learning rate')
-    parser.add_argument('--weight_decay', type=float, default=1e-4,
-                        help='Weight decay')
-    parser.add_argument('--val_split', type=float, default=0.1,
-                        help='Validation split ratio (default: 0.1 for 80:10:10 split)')
+    # Training hyperparameters
+    num_epochs = 30                                # Number of training epochs
+    batch_size = 64                                # Batch size
+    learning_rate = 1e-4                           # Initial learning rate
+    weight_decay = 1e-4                            # Weight decay for optimizer
+    val_split = 0.1                                # Validation split ratio (0.1 = 10%)
     
-    # Class imbalance arguments
-    parser.add_argument('--loss_type', type=str, default='triplet',
-                        choices=['standard', 'weighted', 'focal', 'triplet'],
-                        help='Type of contrastive loss')
-    parser.add_argument('--pos_weight', type=float, default=10.0,
-                        help='Weight for positive pairs (weighted loss)')
-    parser.add_argument('--focal_gamma', type=float, default=2.0,
-                        help='Gamma parameter (focal loss)')
-    parser.add_argument('--triplet_margin', type=float, default=1.0,
-                        help='Margin for triplet loss')
-    parser.add_argument('--samples_per_class', type=int, default=None,
-                        help='Number of samples per class per epoch (for triplet loss)')
+    # Class imbalance handling
+    loss_type = 'triplet'                          # Loss type: 'standard', 'weighted', 'focal', 'triplet'
+    pos_weight = 10.0                              # Weight for positive pairs (weighted loss only)
+    focal_gamma = 2.0                              # Gamma parameter (focal loss only)
+    triplet_margin = 1.0                           # Margin for triplet loss
+    samples_per_class = 1000                       # Samples per class per epoch (triplet loss)
     
-    # Other arguments
-    parser.add_argument('--num_workers', type=int, default=4,
-                        help='Number of data loading workers')
-    parser.add_argument('--random_seed', type=int, default=42,
-                        help='Random seed')
-    parser.add_argument('--save_every', type=int, default=5,
-                        help='Save checkpoint every N epochs')
+    # Other settings
+    num_workers = 4                                # Number of data loading workers
+    random_seed = 42                               # Random seed for reproducibility
+    save_every = 5                                 # Save checkpoint every N epochs
+    early_stopping_patience = 10                   # Stop if no improvement for N epochs
     
-    args = parser.parse_args()
-    
-    # Train
-    train(**vars(args))
+    # ==========================================================================
+    # Run training with the above configuration
+    # ==========================================================================
+    train(
+        metadata_path=metadata_path,
+        img_dir=img_dir,
+        output_dir=output_dir,
+        embedding_dim=embedding_dim,
+        backbone=backbone,
+        pretrained=pretrained,
+        dropout=dropout,
+        num_epochs=num_epochs,
+        batch_size=batch_size,
+        learning_rate=learning_rate,
+        weight_decay=weight_decay,
+        val_split=val_split,
+        loss_type=loss_type,
+        pos_weight=pos_weight,
+        focal_gamma=focal_gamma,
+        triplet_margin=triplet_margin,
+        samples_per_class=samples_per_class,
+        num_workers=num_workers,
+        random_seed=random_seed,
+        save_every=save_every,
+        early_stopping_patience=early_stopping_patience
+    )

@@ -5,7 +5,6 @@ Loads trained model, extracts embeddings, and computes classification metrics.
 
 import os
 import json
-import argparse
 import numpy as np
 from typing import Dict, Tuple, Optional
 from collections import defaultdict
@@ -583,53 +582,54 @@ def predict(
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(
-        description='Evaluate trained Siamese Network on validation set'
-    )
+    # ==========================================================================
+    # PREDICTION/EVALUATION CONFIGURATION
+    # Edit these parameters to configure evaluation without command-line arguments
+    # ==========================================================================
     
-    # Data arguments
-    parser.add_argument('--metadata_path', type=str, default='data/train-metadata.csv',
-                        help='Path to train-metadata.csv')
-    parser.add_argument('--img_dir', type=str, default='data/train-image',
-                        help='Path to image directory')
-    parser.add_argument('--checkpoint_path', type=str, default='outputs/best_model.pth',
-                        help='Path to model checkpoint')
-    parser.add_argument('--output_dir', type=str, default='outputs',
-                        help='Directory to save outputs')
+    # Data paths
+    metadata_path = 'data/train-metadata.csv'      # Path to train-metadata.csv
+    img_dir = 'data/train-image'                   # Path to image directory
+    checkpoint_path = 'outputs/best_model.pth'     # Path to trained model checkpoint
+    output_dir = 'outputs'                         # Directory to save outputs
     
-    # Model arguments
-    parser.add_argument('--embedding_dim', type=int, default=256,
-                        help='Embedding dimension')
-    parser.add_argument('--backbone', type=str, default='resnet50',
-                        help='Backbone architecture')
-    parser.add_argument('--dropout', type=float, default=0.5,
-                        help='Dropout rate')
+    # Model hyperparameters (must match training configuration)
+    embedding_dim = 256                            # Embedding dimension
+    backbone = 'resnet50'                          # Backbone architecture
+    dropout = 0.5                                  # Dropout rate
     
-    # Data arguments
-    parser.add_argument('--val_split', type=float, default=0.1,
-                        help='Validation split ratio (default: 0.1 for 80:10:10 split)')
-    parser.add_argument('--test_split', type=float, default=0.1,
-                        help='Test split ratio (default: 0.1 for 80:10:10 split)')
-    parser.add_argument('--batch_size', type=int, default=32,
-                        help='Batch size for inference')
-    parser.add_argument('--num_workers', type=int, default=4,
-                        help='Number of data loading workers')
-    parser.add_argument('--random_seed', type=int, default=42,
-                        help='Random seed')
+    # Data parameters
+    val_split = 0.1                                # Validation split ratio (0.1 = 10%)
+    test_split = 0.1                               # Test split ratio (0.1 = 10%)
+    batch_size = 32                                # Batch size for inference
+    num_workers = 4                                # Number of data loading workers
+    random_seed = 42                               # Random seed (must match training)
     
-    # Classification arguments
-    parser.add_argument('--method', type=str, default='centroid',
-                        choices=['centroid', 'knn'],
-                        help='Classification method')
-    parser.add_argument('--knn_k', type=int, default=5,
-                        help='Number of neighbors for k-NN')
+    # Classification parameters
+    method = 'centroid'                            # Classification method: 'centroid' or 'knn'
+    knn_k = 5                                      # Number of neighbors for k-NN (if method='knn')
     
     # Evaluation set selection
-    parser.add_argument('--eval_on_test', action='store_true',
-                        help='Evaluate on test set instead of validation set')
+    eval_on_test = False                           # If True, evaluate on test set; if False, on validation set
     
-    args = parser.parse_args()
-    
-    # Run prediction and evaluation
-    predict(**vars(args))
+    # ==========================================================================
+    # Run prediction and evaluation with the above configuration
+    # ==========================================================================
+    predict(
+        metadata_path=metadata_path,
+        img_dir=img_dir,
+        checkpoint_path=checkpoint_path,
+        output_dir=output_dir,
+        embedding_dim=embedding_dim,
+        backbone=backbone,
+        dropout=dropout,
+        val_split=val_split,
+        test_split=test_split,
+        batch_size=batch_size,
+        num_workers=num_workers,
+        random_seed=random_seed,
+        method=method,
+        knn_k=knn_k,
+        eval_on_test=eval_on_test
+    )
 
