@@ -524,8 +524,7 @@ def train(
             mode='min',
             factor=lr_factor,
             patience=lr_patience,
-            min_lr=lr_min,
-            verbose=True
+            min_lr=lr_min
         )
     else:
         raise ValueError(f"Unsupported scheduler: {lr_scheduler}")
