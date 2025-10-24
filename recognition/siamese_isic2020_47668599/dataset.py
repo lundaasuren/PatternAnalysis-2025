@@ -906,17 +906,22 @@ def undersample_training_only(
     print(f"\nReduction: {len(train_df)} → {len(undersampled_df)} samples ({len(undersampled_df)/len(train_df)*100:.1f}%)")
     
     # Detailed verification statistics
-    print(f"\n⚠️  Patient-level statistics:")
+    print(f"\n⚠️  Undersampled Training Pool Statistics:")
     if has_patient_id:
         final_patients = undersampled_df['patient_id'].nunique()
-        print(f"   Patients in undersampled training: {final_patients}")
-    print(f"   Images per class: Class 0={final_counts.get(0, 0)}, Class 1={final_counts.get(1, 0)}")
+        print(f"   Patients: {final_patients}")
+    print(f"   Total images: {len(undersampled_df)}")
+    print(f"   Class 0 (benign): {final_counts.get(0, 0)} images")
+    print(f"   Class 1 (melanoma): {final_counts.get(1, 0)} images")
     if final_counts.get(1, 0) > 0:
-        print(f"   Ratio (minority:majority): 1:{final_counts.get(0, 0)/final_counts.get(1, 0):.2f}")
+        print(f"   Pool ratio: 1:{final_counts.get(0, 0)/final_counts.get(1, 0):.2f}")
     else:
-        print(f"   Ratio (minority:majority): No minority samples!")
+        print(f"   Pool ratio: No minority samples!")
+    print(f"   → This balanced pool will be used for triplet generation each epoch")
     
-    print(f"\n✓ Training set balanced, val/test remain imbalanced for realistic evaluation")
+    print(f"\n✓ Training pool undersampled to ~{target_ratio}:1 ratio for balanced learning")
+    print(f"  Per-epoch sampling will draw from this balanced pool")
+    print(f"  Val/test remain at original imbalanced distribution for realistic evaluation")
     print(f"{'='*70}\n")
     
     return undersampled_df
@@ -1014,6 +1019,22 @@ def create_data_loaders(
             patient_aware=patient_aware,
             target_ratio=target_ratio
         )
+        
+        # Print training data strategy summary
+        minority_count_train = (train_df['target'] == 1).sum()
+        majority_count_train = (train_df['target'] == 0).sum()
+        print(f"{'='*70}")
+        print(f"TRAINING DATA STRATEGY")
+        print(f"{'='*70}")
+        print(f"✓ Training pool: Undersampled to {len(train_df)} images (~{majority_count_train}:{minority_count_train} ratio)")
+        print(f"  This balanced pool enables fair learning from both classes")
+        print(f"✓ Per-epoch sampling: Triplet generation draws from this pool")
+        if use_triplet:
+            epoch_size_estimate = min(minority_count_train, majority_count_train) * 2
+            print(f"  Each epoch will use ~{epoch_size_estimate} triplets (class-balanced sampling)")
+        print(f"✓ Val/test: Remain at original imbalanced distribution (98:2 ratio)")
+        print(f"  Realistic evaluation on real-world class imbalance")
+        print(f"{'='*70}\n")
     else:
         print(f"\n⚠️  WARNING: Training on imbalanced data (98:2 ratio)")
         print(f"   Consider setting undersample_training=True for better results\n")
