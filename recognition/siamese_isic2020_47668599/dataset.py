@@ -80,6 +80,7 @@ class ISICSiameseDataset(Dataset):
     def _generate_fixed_pairs(self, num_pairs_per_class: int = 500) -> List[Tuple]:
         """
         Generate fixed pairs for validation/testing.
+        Uses deterministic generation to avoid heavy repetition.
         
         Args:
             num_pairs_per_class: Number of positive and negative pairs to generate per class
@@ -89,16 +90,24 @@ class ISICSiameseDataset(Dataset):
         """
         pairs = []
         
+        # Use numpy random for deterministic generation
+        rng = np.random.RandomState(42)
+        
         # Generate positive pairs (same class)
         for label in self.labels:
             indices = self.label_to_indices[label]
             if len(indices) < 2:
                 continue
             
-            # Generate pairs up to the limit or all possible combinations
-            max_pairs = min(num_pairs_per_class, len(indices) * (len(indices) - 1) // 2)
-            pairs_generated = 0
+            # Generate all possible unique pairs
+            max_possible_pairs = len(indices) * (len(indices) - 1) // 2
+            max_pairs = min(num_pairs_per_class, max_possible_pairs)
             
+            if max_pairs < num_pairs_per_class:
+                print(f"  Warning: Class {label} has only {max_possible_pairs} unique pairs, "
+                      f"using all (requested {num_pairs_per_class})")
+            
+            pairs_generated = 0
             for i in range(len(indices)):
                 for j in range(i + 1, len(indices)):
                     if pairs_generated >= max_pairs:
@@ -108,17 +117,38 @@ class ISICSiameseDataset(Dataset):
                 if pairs_generated >= max_pairs:
                     break
         
-        # Generate negative pairs (different classes)
+        # Generate negative pairs (different classes) - deterministic sampling
         num_negative = len(pairs)  # Match number of positive pairs
-        for _ in range(num_negative):
-            if len(self.labels) < 2:
-                break
-            label1, label2 = random.sample(self.labels, 2)
-            idx1 = random.choice(self.label_to_indices[label1])
-            idx2 = random.choice(self.label_to_indices[label2])
-            pairs.append((idx1, idx2, 0))  # label=0 for different class
         
-        random.shuffle(pairs)
+        if len(self.labels) >= 2:
+            # Generate negative pairs deterministically without creating all combinations in memory
+            # Use systematic sampling with deterministic random seed
+            negative_pairs = []
+            
+            # Get all indices by class for cross-class pairing
+            class_indices_list = [self.label_to_indices[label] for label in self.labels]
+            
+            # Generate negative pairs by deterministically sampling indices
+            for pair_idx in range(num_negative):
+                # Deterministically select two different classes
+                class_idx1 = pair_idx % len(self.labels)
+                class_idx2 = (pair_idx + 1) % len(self.labels)
+                if class_idx1 == class_idx2:
+                    class_idx2 = (class_idx2 + 1) % len(self.labels)
+                
+                indices1 = class_indices_list[class_idx1]
+                indices2 = class_indices_list[class_idx2]
+                
+                # Deterministically select indices from each class
+                idx1 = indices1[rng.randint(0, len(indices1))]
+                idx2 = indices2[rng.randint(0, len(indices2))]
+                
+                negative_pairs.append((idx1, idx2, 0))
+            
+            pairs.extend(negative_pairs)
+        
+        # Shuffle pairs deterministically
+        rng.shuffle(pairs)
         return pairs
     
     def _get_random_pair(self) -> Tuple[int, int, int]:
@@ -315,36 +345,70 @@ class ISICTripletDataset(Dataset):
     def _generate_fixed_triplets(self) -> List[Tuple]:
         """
         Generate fixed triplets for validation/testing with class balancing.
+        Uses deterministic generation to avoid heavy repetition.
+        
+        Strategy:
+        - Generate all possible unique anchor-positive pairs per class
+        - Assign negatives systematically (round-robin from other classes)
+        - Limit to available unique combinations to avoid excessive repetition
         
         Returns:
             List of tuples (anchor_idx, positive_idx, negative_idx)
         """
         triplets = []
         
-        # Generate equal number of triplets per class
+        # Use numpy random for deterministic generation (already seeded in dataset creation)
+        rng = np.random.RandomState(42)
+        
+        # Generate triplets per class (anchor class)
         for anchor_label in self.labels:
             anchor_indices = self.label_to_indices[anchor_label]
             if len(anchor_indices) < 2:
                 continue
             
-            # Get negative label
+            # Get indices for negative class(es)
             negative_labels = [l for l in self.labels if l != anchor_label]
             if not negative_labels:
                 continue
             
-            for _ in range(self.samples_per_class):
-                # Select anchor and positive from same class
-                if len(anchor_indices) < 2:
-                    break
-                anchor_idx, positive_idx = random.sample(anchor_indices, 2)
-                
-                # Select negative from different class
-                negative_label = random.choice(negative_labels)
-                negative_idx = random.choice(self.label_to_indices[negative_label])
-                
+            # Generate all possible unique anchor-positive pairs for this class
+            anchor_positive_pairs = []
+            for i, anchor_idx in enumerate(anchor_indices):
+                for positive_idx in anchor_indices[i+1:]:
+                    anchor_positive_pairs.append((anchor_idx, positive_idx))
+            
+            # Calculate how many triplets we can reasonably generate
+            max_unique_pairs = len(anchor_positive_pairs)
+            target_triplets = min(self.samples_per_class, max_unique_pairs)
+            
+            # If we have fewer unique pairs than requested, take all
+            if target_triplets < self.samples_per_class:
+                print(f"  Warning: Class {anchor_label} has only {max_unique_pairs} unique pairs, "
+                      f"using all (requested {self.samples_per_class})")
+            
+            # Sample or take all pairs (deterministic with seed)
+            if target_triplets < len(anchor_positive_pairs):
+                # Randomly sample without replacement
+                selected_indices = rng.choice(len(anchor_positive_pairs), size=target_triplets, replace=False)
+                selected_pairs = [anchor_positive_pairs[i] for i in selected_indices]
+            else:
+                selected_pairs = anchor_positive_pairs
+            
+            # Assign negatives systematically (round-robin to distribute evenly)
+            negative_indices_all = []
+            for neg_label in negative_labels:
+                negative_indices_all.extend(self.label_to_indices[neg_label])
+            
+            # Shuffle negative indices for randomness (deterministic)
+            rng.shuffle(negative_indices_all)
+            
+            # Create triplets by cycling through negatives
+            for idx, (anchor_idx, positive_idx) in enumerate(selected_pairs):
+                negative_idx = negative_indices_all[idx % len(negative_indices_all)]
                 triplets.append((anchor_idx, positive_idx, negative_idx))
         
-        random.shuffle(triplets)
+        # Shuffle triplets (deterministic)
+        rng.shuffle(triplets)
         return triplets
     
     def _get_random_triplet(self) -> Tuple[int, int, int]:
@@ -959,6 +1023,7 @@ def create_data_loaders(
         dataset_class = ISICTripletDataset
         
         # Adjust samples_per_class to match actual training data after undersampling
+        train_samples_per_class = samples_per_class
         if samples_per_class is not None:
             minority_count = (train_df['target'] == 1).sum()
             majority_count = (train_df['target'] == 0).sum()
@@ -967,21 +1032,30 @@ def create_data_loaders(
             
             if samples_per_class > adjusted_samples:
                 print(f"\n{'='*70}")
-                print(f"ADJUSTING SAMPLES_PER_CLASS")
+                print(f"ADJUSTING SAMPLES_PER_CLASS FOR TRAINING")
                 print(f"{'='*70}")
                 print(f"⚠️  Requested samples_per_class: {samples_per_class}")
                 print(f"   Training set after undersampling: {len(train_df)} images")
                 print(f"     Class 0 (benign): {majority_count} images")
                 print(f"     Class 1 (melanoma): {minority_count} images")
-                print(f"   Adjusted samples_per_class: {adjusted_samples} (min of both classes)")
+                print(f"   Adjusted samples_per_class for training: {adjusted_samples} (min of both classes)")
                 print(f"   Epoch size will be: {2 * adjusted_samples} triplets = ~{(2 * adjusted_samples) // batch_size} batches")
                 print(f"{'='*70}\n")
-                samples_per_class = adjusted_samples
-            
-        dataset_kwargs = {'samples_per_class': samples_per_class}
+                train_samples_per_class = adjusted_samples
+        
+        # Use adjusted samples_per_class for training only
+        train_dataset_kwargs = {'samples_per_class': train_samples_per_class}
+        
+        # For val/test, use None to let dataset auto-calculate based on their own data
+        # This preserves the imbalanced distribution without excessive repetition
+        val_test_dataset_kwargs = {'samples_per_class': None}
+        
+        print(f"⚠️  Val/test datasets will use auto-calculated samples_per_class based on their minority class size")
+        print(f"   This ensures they remain imbalanced (realistic evaluation)\n")
     else:
         dataset_class = ISICSiameseDataset
-        dataset_kwargs = {}
+        train_dataset_kwargs = {}
+        val_test_dataset_kwargs = {}
     
     # Create datasets
     if verbose:
@@ -992,7 +1066,7 @@ def create_data_loaders(
         img_dir=img_dir,
         transform=get_transforms(train=True, img_size=img_size),
         train=True,
-        **dataset_kwargs
+        **train_dataset_kwargs
     )
     
     if verbose:
@@ -1003,7 +1077,7 @@ def create_data_loaders(
         img_dir=img_dir,
         transform=get_transforms(train=False, img_size=img_size),
         train=False,
-        **dataset_kwargs
+        **val_test_dataset_kwargs
     )
     
     if verbose:
@@ -1014,7 +1088,7 @@ def create_data_loaders(
         img_dir=img_dir,
         transform=get_transforms(train=False, img_size=img_size),
         train=False,
-        **dataset_kwargs
+        **val_test_dataset_kwargs
     )
     
     # Create data loaders
