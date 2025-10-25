@@ -990,21 +990,60 @@ def create_data_loaders(
         if samples_per_class is not None:
             minority_count = (train_df['target'] == 1).sum()
             majority_count = (train_df['target'] == 0).sum()
-            # Set samples_per_class to the smaller class size to avoid excessive repetition
-            adjusted_samples = min(minority_count, majority_count)
             
-            if samples_per_class > adjusted_samples:
-                print(f"\n{'='*70}")
-                print(f"ADJUSTING SAMPLES_PER_CLASS FOR TRAINING")
-                print(f"{'='*70}")
-                print(f"⚠️  Requested samples_per_class: {samples_per_class}")
-                print(f"   Training set after undersampling: {len(train_df)} images")
-                print(f"     Class 0 (benign): {majority_count} images")
-                print(f"     Class 1 (melanoma): {minority_count} images")
-                print(f"   Adjusted samples_per_class for training: {adjusted_samples} (min of both classes)")
-                print(f"   Epoch size will be: {2 * adjusted_samples} triplets = ~{(2 * adjusted_samples) // batch_size} batches")
-                print(f"{'='*70}\n")
-                train_samples_per_class = adjusted_samples
+            # Maximum possible samples without repetition
+            max_possible_samples = min(minority_count, majority_count)
+            
+            # Allow controlled repetition for better data utilization
+            repetition_factor = 2  # Allow 2x repetition for minority class
+            max_allowed_samples = minority_count * repetition_factor
+            
+            # Check if adjustment is needed
+            if samples_per_class > minority_count:
+                # Requested more samples than minority class size - repetition needed
+                if samples_per_class > max_allowed_samples:
+                    # Exceeds even with maximum allowed repetition
+                    adjusted_samples_per_class = max_allowed_samples
+                    print(f"\n{'='*70}")
+                    print(f"ADJUSTING SAMPLES_PER_CLASS FOR TRAINING")
+                    print(f"{'='*70}")
+                    print(f"⚠️  Requested samples_per_class: {samples_per_class}")
+                    print(f"   Training set after undersampling: {len(train_df)} images")
+                    print(f"     Class 0 (benign): {majority_count} images")
+                    print(f"     Class 1 (melanoma): {minority_count} images")
+                    print(f"   Maximum allowed with {repetition_factor}x repetition: {max_allowed_samples}")
+                    print(f"   Adjusted samples_per_class: {adjusted_samples_per_class}")
+                    print(f"{'='*70}\n")
+                else:
+                    # Repetition needed but within allowed limit
+                    adjusted_samples_per_class = samples_per_class
+                    repetition_actual = samples_per_class / minority_count
+                    print(f"\n{'='*70}")
+                    print(f"CONTROLLED REPETITION ENABLED")
+                    print(f"{'='*70}")
+                    print(f"   Requested samples_per_class: {samples_per_class}")
+                    print(f"   Minority class images: {minority_count}")
+                    print(f"   Majority class images: {majority_count}")
+                    print(f"🔄 Each minority image used {repetition_actual:.1f} times per epoch")
+                    print(f"   This allows better batch diversity for triplet mining")
+                    print(f"{'='*70}\n")
+            else:
+                # Requested samples_per_class is within minority class size - no repetition needed
+                adjusted_samples_per_class = samples_per_class
+            
+            # Calculate and log effective training parameters
+            train_samples_per_class = adjusted_samples_per_class
+            total_triplets = train_samples_per_class * 2
+            batch_count = int(np.ceil(total_triplets / batch_size))
+            
+            print(f"{'='*70}")
+            print(f"EFFECTIVE TRAINING PARAMETERS")
+            print(f"{'='*70}")
+            print(f"   Samples per class: {train_samples_per_class}")
+            print(f"   Total triplets per epoch: {total_triplets}")
+            print(f"   Batch size: {batch_size}")
+            print(f"   Batches per epoch: {batch_count}")
+            print(f"{'='*70}\n")
         
         # Use adjusted samples_per_class for training only
         train_dataset_kwargs = {'samples_per_class': train_samples_per_class}

@@ -682,27 +682,22 @@ if __name__ == "__main__":
     output_dir = 'outputs'                         # Directory to save outputs
     
     # Model hyperparameters
-    embedding_dim = 256                            # Embedding dimension
-    backbone = 'efficientnet_b0'                   # Backbone: 'resnet50', 'resnet34', 'efficientnet_b0'
+    embedding_dim = 384                            # Embedding dimension
+    backbone = 'resnet50'                          # Backbone: 'resnet50', 'resnet34', 'efficientnet_b0'
     pretrained = True                              # Use pretrained ImageNet weights
-    dropout = 0.4                                  # Dropout rate
+    dropout = 0.6                                  # Dropout rate
     
     # Training hyperparameters
     num_epochs = 80                                # Number of training epochs (changed from 50)
-    batch_size = 32                                # Batch size
-    learning_rate = 5e-5                           # Initial learning rate (changed from 1e-4)
-    weight_decay = 5e-4                            # Weight decay for optimizer (changed from 1e-4)
+    batch_size = 48                                # Batch size
+    learning_rate = 3e-5                           # Initial learning rate (changed from 1e-4)
+    weight_decay = 1e-3                            # Weight decay for optimizer (changed from 1e-4)
     val_split = 0.1                                # Validation split ratio (0.1 = 10%)
     
     # Learning rate scheduling - COSINE ANNEALING (NEW DEFAULT)
     lr_scheduler = 'CosineAnnealingLR'             # Changed from 'ReduceLROnPlateau'
-    T_max = None                                   # Auto-calculated as num_epochs - lr_warmup_epochs
+    T_max = 75                                     # Auto-calculated as num_epochs - lr_warmup_epochs
     eta_min = 1e-7                                 # Minimum LR at end of training
-    
-    # Legacy ReduceLROnPlateau params (keep for compatibility)
-    lr_factor = 0.1                                # Aggressive reduction factor (0.1 = 10x reduction)
-    lr_patience = 5                                # Patience of 5 epochs before reducing LR
-    lr_min = 1e-7                                  # Minimum learning rate
     
     # Warmup configuration
     lr_warmup_epochs = 5                            # Warmup for 5 epochs (changed from 3)
