@@ -725,202 +725,144 @@ def undersample_training_only(
     target_ratio: float = 1.0
 ) -> pd.DataFrame:
     """
-    ⚠️ CRITICAL: Undersample ONLY the training set to handle class imbalance.
+    Patient-aware undersampling for training set only.
     
-    This is a best practice for medical ML:
-    - Balance training data so model learns both classes equally
-    - Keep val/test imbalanced to reflect real-world distribution
-    - Prevents inflated metrics that don't generalize
+    Strategy:
+    1. Keep ALL patients with ANY minority images (maintains patient integrity)
+    2. Add majority-only patients until reaching target ratio (if possible)
+    3. Accept best-effort ratio if minority-touched patients exceed target
     
     Args:
-        train_df: Training DataFrame (ONLY training, not val/test)
+        train_df: Training dataframe with 'patient_id' and 'target' columns
         random_state: Random seed for reproducibility
-        patient_aware: If True, undersample at patient level (recommended)
-        target_ratio: Target ratio of minority to majority class (1.0 = balanced)
+        patient_aware: If True, use patient-level undersampling
+        target_ratio: Target majority:minority ratio (e.g., 3.0 means 3:1)
     
     Returns:
-        Undersampled training DataFrame
+        Undersampled training dataframe
     """
     print(f"\n{'='*70}")
-    print("TRAINING-ONLY UNDERSAMPLING")
+    print("PATIENT-AWARE TRAINING UNDERSAMPLING")
     print(f"{'='*70}")
-    print("⚠️  Undersampling ONLY training set (val/test remain imbalanced)")
-    print("✓  This ensures realistic evaluation on real-world distribution")
     
-    # Get class counts
-    class_counts = train_df['target'].value_counts().sort_index()
-    print(f"\nOriginal training set distribution:")
-    for cls, count in class_counts.items():
-        print(f"  Class {cls}: {count} samples ({count/len(train_df)*100:.2f}%)")
+    # Identify minority and majority classes
+    minority_class = train_df['target'].value_counts().idxmin()
+    majority_class = train_df['target'].value_counts().idxmax()
     
-    # Identify majority and minority classes
-    minority_class = class_counts.idxmin()
-    majority_class = class_counts.idxmax()
-    minority_count = class_counts.min()
-    majority_count = class_counts.max()
+    minority_count = (train_df['target'] == minority_class).sum()
+    majority_count = (train_df['target'] == majority_class).sum()
+    target_majority_count = int(minority_count * target_ratio)  # ✅ FIXED: multiplication not division
     
-    print(f"\nMinority class: {minority_class} ({minority_count} samples)")
-    print(f"Majority class: {majority_class} ({majority_count} samples)")
-    
-    # Calculate target count for majority class
-    target_majority_count = int(minority_count / target_ratio)
-    print(f"Target majority class count: {target_majority_count} (ratio {target_ratio}:1)")
+    print(f"\nOriginal training distribution:")
+    print(f"  Minority (class {minority_class}): {minority_count} images")
+    print(f"  Majority (class {majority_class}): {majority_count} images")
+    print(f"  Target majority for ratio {target_ratio}:1 = {target_majority_count}")
     
     has_patient_id = 'patient_id' in train_df.columns
     
     if patient_aware and has_patient_id:
-        print(f"\nUsing PATIENT-LEVEL undersampling (prevents data leakage)")
-        print(f"  Strategy: Keep ALL patients with ANY minority images + undersample majority-only patients")
+        # Step 1: Identify patients with ANY minority class images
+        minority_patients = train_df[train_df['target'] == minority_class]['patient_id'].unique()
+        print(f"\nPatients with ANY minority images: {len(minority_patients)}")
         
-        # Identify patients who have at least one minority (melanoma) image
-        # vs patients who have ONLY majority (benign) images
-        patient_has_minority = train_df.groupby('patient_id')['target'].apply(
-            lambda x: (x == minority_class).any()
-        ).reset_index()
-        patient_has_minority.columns = ['patient_id', 'has_minority']
+        # Step 2: Keep ALL images from these patients
+        minority_touched_df = train_df[train_df['patient_id'].isin(minority_patients)]
+        minority_touched_majority = (minority_touched_df['target'] == majority_class).sum()
+        minority_touched_minority = (minority_touched_df['target'] == minority_class).sum()
         
-        # Split patients into two groups
-        minority_touched_patients = patient_has_minority[patient_has_minority['has_minority'] == True]['patient_id'].values
-        majority_only_patients = patient_has_minority[patient_has_minority['has_minority'] == False]['patient_id'].values
+        print(f"  Images from these patients:")
+        print(f"    Minority: {minority_touched_minority}")
+        print(f"    Majority: {minority_touched_majority}")
+        print(f"    Total: {len(minority_touched_df)}")
         
-        print(f"  Patients with ANY minority images: {len(minority_touched_patients)} patients")
-        print(f"  Patients with ONLY majority images: {len(majority_only_patients)} patients")
+        # Step 3: Check if we need more majority images from majority-only patients
+        remaining_majority_needed = target_majority_count - minority_touched_majority
         
-        # Get all images from minority-touched patients (keep ALL their images)
-        minority_touched_data = train_df[train_df['patient_id'].isin(minority_touched_patients)]
-        majority_only_data = train_df[train_df['patient_id'].isin(majority_only_patients)]
-        
-        # Count minority and majority images from minority-touched patients
-        minority_touched_class_counts = minority_touched_data['target'].value_counts()
-        print(f"  Images from minority-touched patients:")
-        print(f"    Class {minority_class}: {minority_touched_class_counts.get(minority_class, 0)}")
-        print(f"    Class {majority_class}: {minority_touched_class_counts.get(majority_class, 0)}")
-        
-        # Total minority images we'll keep (all from minority-touched patients)
-        total_minority_images = minority_touched_class_counts.get(minority_class, 0)
-        total_majority_from_minority_touched = minority_touched_class_counts.get(majority_class, 0)
-        
-        # Calculate target majority images needed to achieve target_ratio
-        target_total_majority = int(total_minority_images / target_ratio)
-        target_majority_from_majority_only = max(0, target_total_majority - total_majority_from_minority_touched)
-        
-        print(f"  Target majority images needed: {target_total_majority}")
-        print(f"    Already have from minority-touched: {total_majority_from_minority_touched}")
-        print(f"    Need from majority-only patients: {target_majority_from_majority_only}")
-        
-        # Undersample majority-only patients to get the target number
-        np.random.seed(random_state)
-        
-        if target_majority_from_majority_only > 0 and len(majority_only_patients) > 0:
-            available_majority_only_images = len(majority_only_data)
+        if remaining_majority_needed > 0:
+            print(f"\n  Additional majority images needed: {remaining_majority_needed}")
             
-            if target_majority_from_majority_only >= available_majority_only_images:
-                # Need all majority-only images (or more than available)
-                print(f"  Using ALL {available_majority_only_images} images from majority-only patients (best-effort balance)")
-                sampled_majority_only_data = majority_only_data
-            else:
-                # Need to sample from majority-only patients
-                # Calculate images per patient for each majority-only patient
-                patient_image_counts = majority_only_data.groupby('patient_id').size().reset_index(name='image_count')
-                patient_image_counts = patient_image_counts.sort_values('image_count')
+            # Get majority-only patients
+            majority_only_patients = train_df[
+                (~train_df['patient_id'].isin(minority_patients)) & 
+                (train_df['target'] == majority_class)
+            ]['patient_id'].unique()
+            
+            print(f"  Majority-only patients available: {len(majority_only_patients)}")
+            
+            # Sample patients (not images) to respect patient integrity
+            np.random.seed(random_state)
+            
+            # Greedily add patients until we reach target
+            sampled_patients = []
+            current_majority = minority_touched_majority
+            
+            for patient in np.random.permutation(majority_only_patients):
+                patient_images = train_df[train_df['patient_id'] == patient]
+                patient_majority_count = (patient_images['target'] == majority_class).sum()
                 
-                # Iteratively add patients until we reach or exceed target
-                # This maintains patient integrity (all images from a patient or none)
-                selected_patients = []
-                cumulative_images = 0
-                
-                for _, row in patient_image_counts.iterrows():
-                    patient_id = row['patient_id']
-                    patient_images = row['image_count']
+                if current_majority + patient_majority_count <= target_majority_count * 1.1:  # 10% tolerance
+                    sampled_patients.append(patient)
+                    current_majority += patient_majority_count
                     
-                    # Add this patient if we haven't exceeded the target yet
-                    # or if we're still far from the target
-                    if cumulative_images < target_majority_from_majority_only:
-                        selected_patients.append(patient_id)
-                        cumulative_images += patient_images
-                    elif cumulative_images == 0:
-                        # Edge case: need at least one patient
-                        selected_patients.append(patient_id)
-                        cumulative_images += patient_images
+                    if current_majority >= target_majority_count:
                         break
-                
-                # If we still need more images, randomly add more patients
-                if cumulative_images < target_majority_from_majority_only:
-                    remaining_patients = [p for p in majority_only_patients if p not in selected_patients]
-                    if len(remaining_patients) > 0:
-                        # Shuffle and add remaining patients
-                        np.random.shuffle(remaining_patients)
-                        for patient_id in remaining_patients:
-                            patient_images = len(majority_only_data[majority_only_data['patient_id'] == patient_id])
-                            selected_patients.append(patient_id)
-                            cumulative_images += patient_images
-                            if cumulative_images >= target_majority_from_majority_only:
-                                break
-                
-                sampled_majority_only_patients = np.array(selected_patients)
-                sampled_majority_only_data = majority_only_data[
-                    majority_only_data['patient_id'].isin(sampled_majority_only_patients)
-                ]
-                
-                # Note: We keep ALL images from sampled patients to maintain patient integrity
-                # This may result in slightly more images than the exact target
-                print(f"  Sampled {len(sampled_majority_only_patients)} majority-only patients")
-                print(f"  Got {len(sampled_majority_only_data)} images from them (target was {target_majority_from_majority_only})")
-                if len(sampled_majority_only_data) > target_majority_from_majority_only:
-                    print(f"  Note: Keeping {len(sampled_majority_only_data) - target_majority_from_majority_only} extra images to maintain patient integrity")
+            
+            print(f"  Sampled {len(sampled_patients)} majority-only patients")
+            print(f"  Total majority images: {current_majority}")
+            
+            # Combine minority-touched + sampled majority-only
+            majority_only_df = train_df[train_df['patient_id'].isin(sampled_patients)]
+            undersampled_df = pd.concat([minority_touched_df, majority_only_df])
+            
         else:
-            # Don't need any images from majority-only patients
-            sampled_majority_only_data = pd.DataFrame()
-            print(f"  Not using any majority-only patients (minority-touched patients provide enough balance)")
-        
-        # Combine all data
-        undersampled_df = pd.concat([minority_touched_data, sampled_majority_only_data], ignore_index=True)
-        
+            print(f"\n⚠️  Minority-touched patients already provide {minority_touched_majority} majority images")
+            print(f"   This exceeds target of {target_majority_count}")
+            print(f"   Keeping all minority-touched patients (strict patient integrity)")
+            undersampled_df = minority_touched_df
+    
     else:
+        # Fallback to image-level undersampling if no patient_id
         if patient_aware and not has_patient_id:
             print(f"\n⚠️  WARNING: patient_aware=True but no patient_id column found")
             print(f"   Using IMAGE-LEVEL undersampling (may have data leakage)")
         else:
             print(f"\nUsing IMAGE-LEVEL undersampling")
         
-        # Image-level undersampling
         minority_data = train_df[train_df['target'] == minority_class]
         majority_data = train_df[train_df['target'] == majority_class]
         
-        # Randomly sample from majority class
-        np.random.seed(random_state)
-        majority_sampled = majority_data.sample(n=target_majority_count, replace=False, random_state=random_state)
+        if len(majority_data) > target_majority_count:
+            majority_sampled = majority_data.sample(n=target_majority_count, replace=False, random_state=random_state)
+        else:
+            majority_sampled = majority_data
         
-        # Combine
         undersampled_df = pd.concat([minority_data, majority_sampled], ignore_index=True)
     
-    # Shuffle the undersampled data
+    # Shuffle
     undersampled_df = undersampled_df.sample(frac=1, random_state=random_state).reset_index(drop=True)
     
-    # Print results
-    final_counts = undersampled_df['target'].value_counts().sort_index()
-    print(f"\nUndersampled training set distribution:")
-    for cls, count in final_counts.items():
-        print(f"  Class {cls}: {count} samples ({count/len(undersampled_df)*100:.2f}%)")
+    # Final statistics
+    final_minority = (undersampled_df['target'] == minority_class).sum()
+    final_majority = (undersampled_df['target'] == majority_class).sum()
+    final_ratio = final_majority / final_minority if final_minority > 0 else 0
     
-    print(f"\nReduction: {len(train_df)} → {len(undersampled_df)} samples ({len(undersampled_df)/len(train_df)*100:.1f}%)")
+    print(f"\n{'='*70}")
+    print("UNDERSAMPLING RESULTS")
+    print(f"{'='*70}")
+    print(f"Original: {len(train_df)} images")
+    print(f"Undersampled: {len(undersampled_df)} images ({len(undersampled_df)/len(train_df)*100:.1f}%)")
+    print(f"\nFinal distribution:")
+    print(f"  Minority: {final_minority} ({final_minority/len(undersampled_df)*100:.1f}%)")
+    print(f"  Majority: {final_majority} ({final_majority/len(undersampled_df)*100:.1f}%)")
+    print(f"  Actual ratio: {final_ratio:.2f}:1")
+    print(f"  Target ratio: {target_ratio:.2f}:1")
     
-    # Detailed verification statistics
-    print(f"\n⚠️  Undersampled Training Pool Statistics:")
-    if has_patient_id:
-        final_patients = undersampled_df['patient_id'].nunique()
-        print(f"   Patients: {final_patients}")
-    print(f"   Total images: {len(undersampled_df)}")
-    print(f"   Class 0 (benign): {final_counts.get(0, 0)} images")
-    print(f"   Class 1 (melanoma): {final_counts.get(1, 0)} images")
-    if final_counts.get(1, 0) > 0:
-        print(f"   Pool ratio: 1:{final_counts.get(0, 0)/final_counts.get(1, 0):.2f}")
-    else:
-        print(f"   Pool ratio: No minority samples!")
-    print(f"   → This balanced pool will be used for triplet generation each epoch")
+    if abs(final_ratio - target_ratio) / target_ratio > 0.2:  # More than 20% off
+        print(f"\n⚠️  Note: Actual ratio differs from target due to patient-level constraints")
+        print(f"   This is CORRECT and maintains patient data integrity")
     
-    print(f"\n✓ Training pool undersampled to ~{target_ratio}:1 ratio for balanced learning")
-    print(f"  Per-epoch sampling will draw from this balanced pool")
+    print(f"\n✓ Training pool undersampled with patient-level integrity maintained")
+    print(f"  Per-epoch sampling will draw from this pool")
     print(f"  Val/test remain at original imbalanced distribution for realistic evaluation")
     print(f"{'='*70}\n")
     
