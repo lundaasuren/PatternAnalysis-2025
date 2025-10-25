@@ -368,10 +368,14 @@ def train(
     weight_decay: float = 1e-4,
     val_split: float = 0.1,
     # Learning rate scheduling
-    lr_scheduler: str = 'ReduceLROnPlateau',
+    lr_scheduler: str = 'CosineAnnealingLR',  # Changed default
+    # For ReduceLROnPlateau (keep for backward compatibility):
     lr_factor: float = 0.1,
     lr_patience: int = 5,
     lr_min: float = 1e-7,
+    # For CosineAnnealingLR (NEW):
+    T_max: Optional[int] = None,  # Defaults to num_epochs - lr_warmup_epochs
+    eta_min: float = 1e-7,  # Minimum LR
     lr_warmup_epochs: int = 3,
     lr_warmup_start: float = 1e-6,
     # Class imbalance handling
@@ -514,11 +518,28 @@ def train(
     if lr_warmup_epochs > 0:
         print(f"  Warmup: {lr_warmup_epochs} epochs ({lr_warmup_start:.2e} → {learning_rate:.2e})")
     
-    print(f"  Factor: {lr_factor} (LR will be multiplied by this on plateau)")
-    print(f"  Patience: {lr_patience} epochs")
-    print(f"  Min LR: {lr_min:.2e}")
-    
-    if lr_scheduler == 'ReduceLROnPlateau':
+    if lr_scheduler == 'CosineAnnealingLR':
+        # Calculate T_max (exclude warmup epochs)
+        if T_max is None:
+            T_max = num_epochs - lr_warmup_epochs
+        
+        print(f"  Cosine Annealing:")
+        print(f"    T_max: {T_max} epochs (full cycle)")
+        print(f"    eta_min: {eta_min:.2e} (minimum LR at end)")
+        print(f"    Smooth decay over {T_max} epochs")
+        
+        scheduler = CosineAnnealingLR(
+            optimizer,
+            T_max=T_max,
+            eta_min=eta_min
+        )
+        
+    elif lr_scheduler == 'ReduceLROnPlateau':
+        print(f"  ReduceLROnPlateau:")
+        print(f"    Factor: {lr_factor} (LR multiplied by this on plateau)")
+        print(f"    Patience: {lr_patience} epochs")
+        print(f"    Min LR: {lr_min:.2e}")
+        
         scheduler = ReduceLROnPlateau(
             optimizer,
             mode='min',
@@ -577,7 +598,11 @@ def train(
         
         # Update learning rate (only after warmup phase)
         if epoch > lr_warmup_epochs:
-            scheduler.step(val_loss)
+            if lr_scheduler == 'CosineAnnealingLR':
+                scheduler.step()  # CosineAnnealingLR doesn't need validation loss
+            elif lr_scheduler == 'ReduceLROnPlateau':
+                scheduler.step(val_loss)  # ReduceLROnPlateau needs validation loss
+                
         current_lr = optimizer.param_groups[0]['lr']
         
         # Update history
@@ -663,34 +688,40 @@ if __name__ == "__main__":
     dropout = 0.4                                  # Dropout rate
     
     # Training hyperparameters
-    num_epochs = 50                                # Number of training epochs
+    num_epochs = 80                                # Number of training epochs (changed from 50)
     batch_size = 32                                # Batch size
-    learning_rate = 1e-4                           # Initial learning rate
-    weight_decay = 1e-4                            # Weight decay for optimizer
+    learning_rate = 5e-5                           # Initial learning rate (changed from 1e-4)
+    weight_decay = 5e-4                            # Weight decay for optimizer (changed from 1e-4)
     val_split = 0.1                                # Validation split ratio (0.1 = 10%)
     
-    # Learning rate scheduling
-    lr_scheduler = 'ReduceLROnPlateau'             # Use LR scheduler to reduce learning rate on plateau
+    # Learning rate scheduling - COSINE ANNEALING (NEW DEFAULT)
+    lr_scheduler = 'CosineAnnealingLR'             # Changed from 'ReduceLROnPlateau'
+    T_max = None                                   # Auto-calculated as num_epochs - lr_warmup_epochs
+    eta_min = 1e-7                                 # Minimum LR at end of training
+    
+    # Legacy ReduceLROnPlateau params (keep for compatibility)
     lr_factor = 0.1                                # Aggressive reduction factor (0.1 = 10x reduction)
     lr_patience = 5                                # Patience of 5 epochs before reducing LR
     lr_min = 1e-7                                  # Minimum learning rate
-    lr_warmup_epochs = 3                           # Warmup for 3 epochs (gradual LR increase)
-    lr_warmup_start = 1e-6                         # Start warmup from very low LR
+    
+    # Warmup configuration
+    lr_warmup_epochs = 5                            # Warmup for 5 epochs (changed from 3)
+    lr_warmup_start = 1e-6                          # Start warmup from very low LR
     
     # Class imbalance handling
     loss_type = 'triplet'                          # Loss type: 'standard', 'weighted', 'focal', 'triplet'
     pos_weight = 10.0                              # Weight for positive pairs (weighted loss only)
     focal_gamma = 2.0                              # Gamma parameter (focal loss only)
-    triplet_margin = 0.5                           # Margin for triplet loss
+    triplet_margin = 0.5                          # Margin for triplet loss
     samples_per_class = 1000                       # Samples per class per epoch (triplet loss)
     undersample_training = True                    # ⚠️ CRITICAL: Balance ONLY training set (val/test remain imbalanced)
-    target_ratio = 1.0                             # Target ratio for undersampling (1.0 = balanced 1:1)
+    target_ratio = 3.0                             # Target ratio for undersampling (changed from 1.0)
     
     # Other settings
     num_workers = 1                                # Number of data loading workers
     random_seed = 42                               # Random seed for reproducibility
     save_every = 5                                 # Save checkpoint every N epochs
-    early_stopping_patience = 10                   # Stop if no improvement for N epochs
+    early_stopping_patience = 20                   # Stop if no improvement for N epochs (changed from 10)
     patient_aware = True                           # Split by patient_id (prevents data leakage)
     
     # ==========================================================================
@@ -710,6 +741,8 @@ if __name__ == "__main__":
         weight_decay=weight_decay,
         val_split=val_split,
         lr_scheduler=lr_scheduler,
+        T_max=T_max,  # NEW
+        eta_min=eta_min,  # NEW
         lr_factor=lr_factor,
         lr_patience=lr_patience,
         lr_min=lr_min,
