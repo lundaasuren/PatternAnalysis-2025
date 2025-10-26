@@ -325,25 +325,51 @@ class ISICTripletDataset(Dataset):
         # Class-balanced sampling: equal triplets per class
         if samples_per_class is None:
             min_class_size = min(len(self.label_to_indices[label]) for label in self.labels)
-
-            # Goal: Use ~25% of the dataset per epoch for good diversity.
-            target_epoch_coverage = 0.25
             total_images = len(self.df)
+            
+            # Target: Use significant portion of dataset per epoch
+            target_epoch_coverage = 0.25  # 25% of dataset
             target_triplets = int(total_images * target_epoch_coverage)
-            samples_per_class = target_triplets // len(self.labels)
-
-            # Safety net: Ensure we use at least 2x minority class (allows controlled repetition).
-            samples_per_class = max(samples_per_class, min_class_size * 2)
-
-            # Informative logging to verify the fix.
+            samples_per_class_calculated = target_triplets // len(self.labels)
+            
+            # Smart adaptive safety net
+            if total_images < 2000:
+                # Small dataset: Limit repetition to avoid overfitting
+                # Use 100-150% of minority class (allows some repetition for diversity)
+                max_samples_per_class = int(min_class_size * 1.5)
+                samples_per_class = min(samples_per_class_calculated, max_samples_per_class)
+                samples_per_class = max(samples_per_class, min_class_size)  # At least 1x minority
+                
+            elif min_class_size < 100:
+                # Very small minority class: Allow controlled repetition
+                # Use 2-3x minority class for sufficient triplet diversity
+                max_samples_per_class = min_class_size * 3
+                samples_per_class = min(samples_per_class_calculated, max_samples_per_class)
+                samples_per_class = max(samples_per_class, min_class_size * 2)  # At least 2x
+                
+            else:
+                # Normal/large dataset: Use calculated value with reasonable bounds
+                # Limit repetition of minority class to 4x max
+                max_samples_per_class = min_class_size * 4
+                samples_per_class = min(samples_per_class_calculated, max_samples_per_class)
+                samples_per_class = max(samples_per_class, min_class_size)  # At least 1x minority
+            
+            # Calculate actual metrics
+            total_triplets = samples_per_class * len(self.labels)
+            actual_coverage = total_triplets / total_images if total_images > 0 else 0
+            minority_repetition = samples_per_class / min_class_size if min_class_size > 0 else 0
+            
             print(f"\n{'='*70}")
-            print("AUTO-CALCULATED SAMPLES_PER_CLASS")
+            print(f"AUTO-CALCULATED SAMPLES_PER_CLASS")
             print(f"{'='*70}")
-            print(f"Total images in training pool: {total_images:,}")
-            print(f"Minority class size: {min_class_size:,}")
+            print(f"Dataset size: {total_images:,} images")
+            print(f"Minority class size: {min_class_size}")
             print(f"Target epoch coverage: {target_epoch_coverage*100:.0f}%")
-            print(f"Auto-calculated samples_per_class: {samples_per_class:,}")
-            print(f"Total triplets per epoch: {samples_per_class * len(self.labels):,}")
+            print(f"Calculated samples_per_class: {samples_per_class_calculated}")
+            print(f"Applied safety bounds: {samples_per_class}")
+            print(f"Actual epoch coverage: {actual_coverage*100:.1f}%")
+            print(f"Minority class repetition: {minority_repetition:.2f}x per epoch")
+            print(f"Total triplets per epoch: {total_triplets:,}")
             print(f"{'='*70}\n")
         
         self.samples_per_class = samples_per_class
@@ -839,13 +865,18 @@ def undersample_training_only(
             undersampled_df = minority_touched_df
     
     else:
-        # Fallback to image-level undersampling if no patient_id
-        if patient_aware and not has_patient_id:
-            print(f"\n⚠️  WARNING: patient_aware=True but no patient_id column found")
-            print(f"   Using IMAGE-LEVEL undersampling (may have data leakage)")
+        # IMAGE-LEVEL UNDERSAMPLING
+        print(f"\n{'='*70}")
+        print("IMAGE-LEVEL TRAINING UNDERSAMPLING")
+        if not patient_aware:
+            print("⚠️  Patient integrity DISABLED - allows exact target ratio")
+        elif not has_patient_id:
+            print("⚠️  No patient_id column found - using image-level undersampling")
         else:
-            print(f"\nUsing IMAGE-LEVEL undersampling")
+            print("Using image-level undersampling")
+        print(f"{'='*70}")
         
+        # Simple random undersampling
         minority_data = train_df[train_df['target'] == minority_class]
         majority_data = train_df[train_df['target'] == majority_class]
         
@@ -853,7 +884,10 @@ def undersample_training_only(
             majority_sampled = majority_data.sample(n=target_majority_count, replace=False, random_state=random_state)
         else:
             majority_sampled = majority_data
+            print(f"\n⚠️  Not enough majority samples (have {len(majority_data)}, need {target_majority_count})")
+            print(f"   Using all {len(majority_data)} majority images")
         
+        # Combine and shuffle
         undersampled_df = pd.concat([minority_data, majority_sampled], ignore_index=True)
     
     # Shuffle
@@ -875,13 +909,23 @@ def undersample_training_only(
     print(f"  Actual ratio: {final_ratio:.2f}:1")
     print(f"  Target ratio: {target_ratio:.2f}:1")
     
-    if abs(final_ratio - target_ratio) / target_ratio > 0.2:  # More than 20% off
-        print(f"\n⚠️  Note: Actual ratio differs from target due to patient-level constraints")
-        print(f"   This is CORRECT and maintains patient data integrity")
+    # Different messages for patient-aware vs image-level
+    if patient_aware and has_patient_id:
+        if abs(final_ratio - target_ratio) / target_ratio > 0.2:  # More than 20% off
+            print(f"\n⚠️  Note: Actual ratio differs from target due to patient-level constraints")
+            print(f"   This is CORRECT and maintains patient data integrity")
+        print(f"\n✓ Training pool undersampled with patient-level integrity maintained")
+        print(f"  Per-epoch sampling will draw from this pool")
+        print(f"  Val/test remain at original imbalanced distribution for realistic evaluation")
+    else:
+        # Image-level undersampling
+        if abs(final_ratio - target_ratio) < 0.01:  # Within 1% of target
+            print(f"\n✓ Image-level undersampling complete - EXACT target ratio achieved!")
+        else:
+            print(f"\n⚠️  Note: Actual ratio ({final_ratio:.2f}:1) differs from target ({target_ratio:.2f}:1)")
+        print(f"  Training pool perfectly balanced for optimal triplet learning")
+        print(f"  Val/test remain imbalanced for realistic evaluation")
     
-    print(f"\n✓ Training pool undersampled with patient-level integrity maintained")
-    print(f"  Per-epoch sampling will draw from this pool")
-    print(f"  Val/test remain at original imbalanced distribution for realistic evaluation")
     print(f"{'='*70}\n")
     
     return undersampled_df

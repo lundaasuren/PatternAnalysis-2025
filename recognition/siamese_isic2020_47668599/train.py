@@ -682,42 +682,42 @@ if __name__ == "__main__":
     output_dir = 'outputs'                         # Directory to save outputs
     
     # Model hyperparameters
-    embedding_dim = 384                            # Embedding dimension
+    embedding_dim = 512                            # Embedding dimension (increased from 384 for more capacity)
     backbone = 'resnet50'                          # Backbone: 'resnet50', 'resnet34', 'efficientnet_b0'
     pretrained = True                              # Use pretrained ImageNet weights
-    dropout = 0.6                                  # Dropout rate
+    dropout = 0.5                                  # Dropout rate (reduced from 0.6 for less aggressive regularization)
     
     # Training hyperparameters
-    num_epochs = 80                                # Number of training epochs (changed from 50)
-    batch_size = 48                                # Batch size
-    learning_rate = 3e-5                           # Initial learning rate (changed from 1e-4)
-    weight_decay = 1e-3                            # Weight decay for optimizer (changed from 1e-4)
+    num_epochs = 120                               # Number of training epochs (increased for 1x repetition)
+    batch_size = 64                                # Batch size (increased from 48 for better gradients, use 48 if GPU limited)
+    learning_rate = 5e-5                           # Initial learning rate (increased from 3e-5)
+    weight_decay = 3e-4                            # Weight decay for optimizer (reduced from 1e-3 for less aggressive L2)
     val_split = 0.1                                # Validation split ratio (0.1 = 10%)
     
     # Learning rate scheduling - COSINE ANNEALING (NEW DEFAULT)
     lr_scheduler = 'CosineAnnealingLR'             # Changed from 'ReduceLROnPlateau'
-    T_max = 75                                     # Auto-calculated as num_epochs - lr_warmup_epochs
+    T_max = 115                                    # Auto-calculated as num_epochs - lr_warmup_epochs
     eta_min = 1e-7                                 # Minimum LR at end of training
     
     # Warmup configuration
-    lr_warmup_epochs = 5                            # Warmup for 5 epochs (changed from 3)
-    lr_warmup_start = 1e-6                          # Start warmup from very low LR
+    lr_warmup_epochs = 5                           # Warmup for 5 epochs
+    lr_warmup_start = 1e-6                         # Start warmup from very low LR
     
-    # Class imbalance handling
+    # Class imbalance handling - KEY CHANGES
     loss_type = 'triplet'                          # Loss type: 'standard', 'weighted', 'focal', 'triplet'
     pos_weight = 10.0                              # Weight for positive pairs (weighted loss only)
     focal_gamma = 2.0                              # Gamma parameter (focal loss only)
-    triplet_margin = 0.5                          # Margin for triplet loss
-    samples_per_class = 1000                       # Samples per class per epoch (triplet loss)
+    triplet_margin = 1.0                           # Margin for triplet loss (increased from 0.5 for harder constraint)
+    samples_per_class = None                       # Samples per class per epoch (auto-calculate with 25% coverage)
     undersample_training = True                    # ⚠️ CRITICAL: Balance ONLY training set (val/test remain imbalanced)
-    target_ratio = 3.0                             # Target ratio for undersampling (changed from 1.0)
+    target_ratio = 1.0                             # Target ratio for undersampling (1:1 TRUE balance)
     
     # Other settings
-    num_workers = 1                                # Number of data loading workers
+    num_workers = 4                                # Number of data loading workers (increased from 1 for better loading)
     random_seed = 42                               # Random seed for reproducibility
-    save_every = 5                                 # Save checkpoint every N epochs
-    early_stopping_patience = 20                   # Stop if no improvement for N epochs (changed from 10)
-    patient_aware = True                           # Split by patient_id (prevents data leakage)
+    save_every = 10                                # Save checkpoint every N epochs (less frequent, increased from 5)
+    early_stopping_patience = 30                   # Stop if no improvement for N epochs (increased for 1x repetition)
+    patient_aware = False                          # ⚠️ CRITICAL: Image-level undersampling for exact 1:1 balance
     
     # ==========================================================================
     # Run training with the above configuration
@@ -738,9 +738,6 @@ if __name__ == "__main__":
         lr_scheduler=lr_scheduler,
         T_max=T_max,  # NEW
         eta_min=eta_min,  # NEW
-        lr_factor=lr_factor,
-        lr_patience=lr_patience,
-        lr_min=lr_min,
         lr_warmup_epochs=lr_warmup_epochs,
         lr_warmup_start=lr_warmup_start,
         loss_type=loss_type,
