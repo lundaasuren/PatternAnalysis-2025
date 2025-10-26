@@ -324,9 +324,27 @@ class ISICTripletDataset(Dataset):
         
         # Class-balanced sampling: equal triplets per class
         if samples_per_class is None:
-            # Default: generate equal number of triplets for each class
             min_class_size = min(len(self.label_to_indices[label]) for label in self.labels)
-            samples_per_class = min(min_class_size * 2, 500)  # Cap at 500 per class
+
+            # Goal: Use ~25% of the dataset per epoch for good diversity.
+            target_epoch_coverage = 0.25
+            total_images = len(self.df)
+            target_triplets = int(total_images * target_epoch_coverage)
+            samples_per_class = target_triplets // len(self.labels)
+
+            # Safety net: Ensure we use at least 2x minority class (allows controlled repetition).
+            samples_per_class = max(samples_per_class, min_class_size * 2)
+
+            # Informative logging to verify the fix.
+            print(f"\n{'='*70}")
+            print("AUTO-CALCULATED SAMPLES_PER_CLASS")
+            print(f"{'='*70}")
+            print(f"Total images in training pool: {total_images:,}")
+            print(f"Minority class size: {min_class_size:,}")
+            print(f"Target epoch coverage: {target_epoch_coverage*100:.0f}%")
+            print(f"Auto-calculated samples_per_class: {samples_per_class:,}")
+            print(f"Total triplets per epoch: {samples_per_class * len(self.labels):,}")
+            print(f"{'='*70}\n")
         
         self.samples_per_class = samples_per_class
         
@@ -873,8 +891,8 @@ def get_transforms(train: bool = True, img_size: int = 224) -> transforms.Compos
     """
     Get image transforms for training or validation.
     
-    Training augmentation uses ONLY geometric transforms (no color augmentation).
-    This preserves color information which is critical for melanoma detection.
+    Training augmentation uses geometric transforms with mild color augmentation.
+    Mild color jitter preserves diagnostic color information while adding diversity.
     
     Args:
         train: If True, include geometric data augmentation
@@ -885,10 +903,13 @@ def get_transforms(train: bool = True, img_size: int = 224) -> transforms.Compos
     """
     if train:
         return transforms.Compose([
-            transforms.Resize((img_size, img_size)),
+            # RandomResizedCrop for better robustness (replaces Resize)
+            transforms.RandomResizedCrop(img_size, scale=(0.85, 1.0)),
             transforms.RandomHorizontalFlip(p=0.5),
             transforms.RandomVerticalFlip(p=0.5),
             transforms.RandomRotation(20),
+            # Mild ColorJitter for photometric variety (preserves diagnostic color info)
+            transforms.ColorJitter(brightness=0.1, contrast=0.1, saturation=0.1),
             transforms.ToTensor(),
             transforms.Normalize(mean=[0.485, 0.456, 0.406], 
                                std=[0.229, 0.224, 0.225])  # ImageNet stats
