@@ -135,15 +135,15 @@ class ISICTripletDataset(Dataset):
         """Return the number of samples in the dataset."""
         return len(self.df)
     
-    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """
-        Get a triplet of images.
+        Get a triplet of images plus a dummy label.
         
         Args:
             idx: Index
         
         Returns:
-            Tuple of (anchor, positive, negative)
+            Tuple of (anchor, positive, negative, label)
         """
         if self.train:
             # Generate random triplet
@@ -176,7 +176,10 @@ class ISICTripletDataset(Dataset):
             positive = self.transform(positive)
             negative = self.transform(negative)
         
-        return anchor, positive, negative
+        # Add dummy label for compatibility with train.py
+        label = torch.tensor(0)
+        
+        return anchor, positive, negative, label
 
 
 def load_and_split_data(
@@ -242,7 +245,7 @@ def load_and_split_data(
 
 def get_transforms(train: bool = True, img_size: int = 224):
     """
-    Get image transforms with intensity scaling.
+    Get image transforms with intensity scaling to [0, 1].
     
     Args:
         train: If True, include data augmentation
@@ -258,15 +261,13 @@ def get_transforms(train: bool = True, img_size: int = 224):
             transforms.RandomHorizontalFlip(p=0.5),
             transforms.RandomVerticalFlip(p=0.5),
             transforms.RandomRotation(degrees=10),
-            transforms.ToTensor(),
-            # Scale intensity to [0, 1] range (already done by ToTensor)
+            transforms.ToTensor(),  # Automatically scales to [0, 1]
         ])
     else:
         # Validation/test transforms without augmentation
         transform = transforms.Compose([
             transforms.Resize((img_size, img_size)),
-            transforms.ToTensor(),
-            transforms.Lambda(lambda x: x * 2.0 - 1.0)  # Scale to [-1, 1]
+            transforms.ToTensor(),  # Automatically scales to [0, 1]
         ])
     
     return transform
@@ -274,7 +275,8 @@ def get_transforms(train: bool = True, img_size: int = 224):
 
 def create_weighted_sampler(df: pd.DataFrame) -> WeightedRandomSampler:
     """
-    Create WeightedRandomSampler for balanced class sampling.
+    Create WeightedRandomSampler that undersamples the majority class.
+    Sets weights to achieve balanced sampling without over-representing minority class.
     
     Args:
         df: DataFrame with 'target' column
@@ -282,33 +284,50 @@ def create_weighted_sampler(df: pd.DataFrame) -> WeightedRandomSampler:
     Returns:
         WeightedRandomSampler instance
     """
-    # Calculate class weights
+    # Calculate class counts
     class_counts = df['target'].value_counts().to_dict()
     total_samples = len(df)
     
-    # Weight is inverse of class frequency
-    class_weights = {label: total_samples / count for label, count in class_counts.items()}
+    # Identify minority class (smallest count)
+    minority_count = min(class_counts.values())
+    
+    # Set weights: minority class = 1.0, majority classes proportionally reduced
+    # This ensures majority class is sampled less frequently (undersampling)
+    class_weights = {}
+    for label, count in class_counts.items():
+        # Weight = minority_count / class_count
+        # This gives weight 1.0 to minority, <1.0 to majority
+        class_weights[label] = minority_count / count
     
     # Assign weight to each sample
     sample_weights = [class_weights[label] for label in df['target']]
     
+    # Calculate effective samples per class after weighting
+    effective_samples = {label: int(count * class_weights[label]) 
+                        for label, count in class_counts.items()}
+    
     print(f"\n{'='*70}")
-    print("WEIGHTED RANDOM SAMPLER")
+    print("WEIGHTED RANDOM SAMPLER (UNDERSAMPLING)")
     print(f"{'='*70}")
-    print(f"Class counts: {class_counts}")
-    print(f"Class weights: {class_weights}")
-    print(f"Total samples: {total_samples}")
+    print(f"Original class counts: {class_counts}")
+    print(f"Minority class count: {minority_count}")
+    print(f"Class weights (undersample majority): {class_weights}")
+    print(f"Effective samples per class: {effective_samples}")
+    print(f"Total original samples: {total_samples}")
+    print(f"Effective balanced samples: ~{minority_count * len(class_counts)}")
     print(f"{'='*70}\n")
     
     # Create sampler with replacement=True
+    # num_samples = effective balanced dataset size
+    num_samples = minority_count * len(class_counts)
+    
     sampler = WeightedRandomSampler(
         weights=sample_weights,
-        num_samples=len(sample_weights),
+        num_samples=num_samples,
         replacement=True
     )
     
     return sampler
-
 
 def get_dataloaders(
     metadata_path: str,
@@ -399,7 +418,7 @@ if __name__ == "__main__":
     print(f"Test batches: {len(test_loader)}")
     
     # Test loading a batch
-    anchor, positive, negative = next(iter(train_loader))
+    anchor, positive, negative, label = next(iter(train_loader))
     print(f"\nBatch shapes:")
     print(f"Anchor: {anchor.shape}")
     print(f"Positive: {positive.shape}")

@@ -105,7 +105,12 @@ def train(
     
     # Load data
     print("\nLoading data...")
-    train_loader, test_loader, val_loader = get_dataloaders()
+    train_loader, val_loader, test_loader = get_dataloaders(
+        metadata_path=metadata_path,
+        img_dir=img_dir,
+        batch_size=batch_size,
+        num_workers=num_workers
+    )
     print(f"Train batches: {len(train_loader)}")
     print(f"Val batches: {len(val_loader)}")
     print(f"Test batches: {len(test_loader)}")
