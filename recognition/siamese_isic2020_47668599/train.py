@@ -1,755 +1,240 @@
 """
-Training script for Siamese Network on ISIC 2020 dataset.
-Includes strategies for handling severe class imbalance (98% benign, 2% melanoma).
+Simplified training script for Siamese Network on ISIC 2020 dataset.
+Trains for 100 epochs with fixed learning rate.
 """
 
 import os
-import json
+import time
 from datetime import datetime
-from typing import Optional
-import numpy as np
 import matplotlib.pyplot as plt
 
 import torch
-import torch.nn as nn
-import torch.optim as optim
-from torch.optim.lr_scheduler import ReduceLROnPlateau, CosineAnnealingLR
-from tqdm import tqdm
+from torch.nn import TripletMarginLoss
+from torch.optim import Adam
 
-from dataset import create_data_loaders, ISICSiameseDataset, ISICTripletDataset
-from modules import get_model, compute_accuracy, ContrastiveLoss, TripletLoss
-import torch.nn.functional as F
+from dataset import get_dataloaders
+from modules import SiameseNetwork
 
 
-class WeightedContrastiveLoss(nn.Module):
+def process_batch(siamese, tripletloss, anchor, positive, negative, device):
     """
-    Weighted Contrastive Loss to handle class imbalance.
-    Gives higher weight to positive (melanoma) pairs.
-    """
-    
-    def __init__(self, margin: float = 1.0, pos_weight: float = 10.0):
-        """
-        Args:
-            margin: Margin for dissimilar pairs
-            pos_weight: Weight multiplier for positive (melanoma) pairs
-        """
-        super(WeightedContrastiveLoss, self).__init__()
-        self.margin = margin
-        self.pos_weight = pos_weight
-    
-    def forward(
-        self,
-        embedding1: torch.Tensor,
-        embedding2: torch.Tensor,
-        label: torch.Tensor
-    ) -> torch.Tensor:
-        """
-        Compute weighted contrastive loss.
-        
-        Args:
-            embedding1: First embedding [batch_size, embedding_dim]
-            embedding2: Second embedding [batch_size, embedding_dim]
-            label: Similarity labels [batch_size]
-                   1 for similar pairs (same class)
-                   0 for dissimilar pairs (different class)
-        
-        Returns:
-            Weighted contrastive loss (scalar)
-        """
-        # Compute Euclidean distance
-        euclidean_distance = F.pairwise_distance(embedding1, embedding2)
-        
-        # For similar pairs (label=1): minimize distance
-        loss_similar = label * torch.pow(euclidean_distance, 2)
-        
-        # For dissimilar pairs (label=0): maximize distance up to margin
-        loss_dissimilar = (1 - label) * torch.pow(
-            torch.clamp(self.margin - euclidean_distance, min=0.0), 2
-        )
-        
-        # Apply weights (give more importance to similar pairs from minority class)
-        # In our pair generation, similar pairs include melanoma-melanoma pairs
-        weighted_loss_similar = self.pos_weight * loss_similar
-        
-        # Total loss
-        loss = 0.5 * torch.mean(weighted_loss_similar + loss_dissimilar)
-        
-        return loss
-
-
-class FocalContrastiveLoss(nn.Module):
-    """
-    Focal Contrastive Loss - focuses on hard examples.
-    Inspired by Focal Loss for object detection.
-    """
-    
-    def __init__(self, margin: float = 1.0, gamma: float = 2.0):
-        """
-        Args:
-            margin: Margin for dissimilar pairs
-            gamma: Focusing parameter (higher = focus more on hard examples)
-        """
-        super(FocalContrastiveLoss, self).__init__()
-        self.margin = margin
-        self.gamma = gamma
-    
-    def forward(
-        self,
-        embedding1: torch.Tensor,
-        embedding2: torch.Tensor,
-        label: torch.Tensor
-    ) -> torch.Tensor:
-        """
-        Compute focal contrastive loss.
-        """
-        euclidean_distance = F.pairwise_distance(embedding1, embedding2)
-        
-        # Standard contrastive loss components
-        loss_similar = label * torch.pow(euclidean_distance, 2)
-        loss_dissimilar = (1 - label) * torch.pow(
-            torch.clamp(self.margin - euclidean_distance, min=0.0), 2
-        )
-        
-        # Apply focal weighting (down-weight easy examples)
-        pt_similar = torch.exp(-loss_similar)
-        focal_weight_similar = (1 - pt_similar) ** self.gamma
-        
-        pt_dissimilar = torch.exp(-loss_dissimilar)
-        focal_weight_dissimilar = (1 - pt_dissimilar) ** self.gamma
-        
-        # Weighted loss
-        loss = 0.5 * torch.mean(
-            focal_weight_similar * loss_similar + 
-            focal_weight_dissimilar * loss_dissimilar
-        )
-        
-        return loss
-
-
-def train_one_epoch(
-    model: nn.Module,
-    train_loader: torch.utils.data.DataLoader,
-    criterion: nn.Module,
-    optimizer: optim.Optimizer,
-    device: torch.device,
-    epoch: int,
-    total_epochs: int,
-    use_triplet: bool = False
-) -> tuple:
-    """
-    Train for one epoch.
+    Process a batch of triplets and return loss.
     
     Args:
-        use_triplet: If True, use triplet loss training
+        siamese: Siamese network model
+        tripletloss: Triplet loss function
+        anchor: Anchor images
+        positive: Positive images
+        negative: Negative images
+        device: Device to run on
     
     Returns:
-        Tuple of (avg_loss, avg_accuracy)
+        Loss tensor
     """
-    model.train()
-    running_loss = 0.0
-    running_accuracy = 0.0
-    num_batches = len(train_loader)
+    anchor = anchor.to(device)
+    positive = positive.to(device)
+    negative = negative.to(device)
     
-    pbar = tqdm(train_loader, desc=f'Epoch {epoch}/{total_epochs} [Train]')
-    
-    for batch_idx, batch_data in enumerate(pbar):
-        if use_triplet:
-            # Triplet: anchor, positive, negative
-            anchor, positive, negative = batch_data
-            anchor = anchor.to(device)
-            positive = positive.to(device)
-            negative = negative.to(device)
-            
-            # Zero gradients
-            optimizer.zero_grad()
-            
-            # Forward pass
-            anchor_emb = model.get_embedding(anchor)
-            positive_emb = model.get_embedding(positive)
-            negative_emb = model.get_embedding(negative)
-            
-            loss = criterion(anchor_emb, positive_emb, negative_emb)
-            
-            # Compute accuracy (positive distance < negative distance)
-            with torch.no_grad():
-                pos_dist = F.pairwise_distance(anchor_emb, positive_emb)
-                neg_dist = F.pairwise_distance(anchor_emb, negative_emb)
-                accuracy = (pos_dist < neg_dist).float().mean().item()
-        else:
-            # Pair: img1, img2, labels
-            img1, img2, labels = batch_data
-            img1 = img1.to(device)
-            img2 = img2.to(device)
-            labels = labels.to(device)
-            
-            # Zero gradients
-            optimizer.zero_grad()
-            
-            # Forward pass
-            emb1, emb2 = model(img1, img2)
-            loss = criterion(emb1, emb2, labels)
-            
-            # Compute accuracy
-            with torch.no_grad():
-                accuracy = compute_accuracy(emb1, emb2, labels, threshold=0.5)
-        
-        # Backward pass
-        loss.backward()
-        
-        # Gradient clipping (helps with stability)
-        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-        
-        optimizer.step()
-        
-        # Update metrics
-        running_loss += loss.item()
-        running_accuracy += accuracy
-        
-        # Update progress bar
-        pbar.set_postfix({
-            'loss': f'{loss.item():.4f}',
-            'acc': f'{accuracy:.4f}'
-        })
-    
-    avg_loss = running_loss / num_batches
-    avg_accuracy = running_accuracy / num_batches
-    
-    return avg_loss, avg_accuracy
+    anchor_result, positive_result, negative_result = siamese(anchor, positive, negative)
+    return tripletloss(anchor_result, positive_result, negative_result)
 
 
-def validate(
-    model: nn.Module,
-    val_loader: torch.utils.data.DataLoader,
-    criterion: nn.Module,
-    device: torch.device,
-    epoch: int,
-    total_epochs: int,
-    use_triplet: bool = False
-) -> tuple:
+def generate_loss_plot(train_loss, val_loss, output_dir='outputs'):
     """
-    Validate the model.
+    Plot training and validation loss.
     
     Args:
-        use_triplet: If True, use triplet loss validation
-    
-    Returns:
-        Tuple of (avg_loss, avg_accuracy)
+        train_loss: List of training losses
+        val_loss: List of validation losses
+        output_dir: Directory to save plot
     """
-    model.eval()
-    running_loss = 0.0
-    running_accuracy = 0.0
-    num_batches = len(val_loader)
+    plt.figure(figsize=(10, 6))
+    epochs = range(1, len(train_loss) + 1)
     
-    pbar = tqdm(val_loader, desc=f'Epoch {epoch}/{total_epochs} [Val]')
+    plt.plot(epochs, train_loss, 'b-', label='Train Loss', linewidth=2)
+    plt.plot(epochs, val_loss, 'r-', label='Val Loss', linewidth=2)
+    plt.xlabel('Epoch', fontsize=12)
+    plt.ylabel('Loss', fontsize=12)
+    plt.title('Training and Validation Loss', fontsize=14, fontweight='bold')
+    plt.legend(fontsize=10)
+    plt.grid(True, alpha=0.3)
     
-    with torch.no_grad():
-        for batch_data in pbar:
-            if use_triplet:
-                # Triplet: anchor, positive, negative
-                anchor, positive, negative = batch_data
-                anchor = anchor.to(device)
-                positive = positive.to(device)
-                negative = negative.to(device)
-                
-                # Forward pass
-                anchor_emb = model.get_embedding(anchor)
-                positive_emb = model.get_embedding(positive)
-                negative_emb = model.get_embedding(negative)
-                
-                loss = criterion(anchor_emb, positive_emb, negative_emb)
-                
-                # Compute accuracy
-                pos_dist = F.pairwise_distance(anchor_emb, positive_emb)
-                neg_dist = F.pairwise_distance(anchor_emb, negative_emb)
-                accuracy = (pos_dist < neg_dist).float().mean().item()
-            else:
-                # Pair: img1, img2, labels
-                img1, img2, labels = batch_data
-                img1 = img1.to(device)
-                img2 = img2.to(device)
-                labels = labels.to(device)
-                
-                # Forward pass
-                emb1, emb2 = model(img1, img2)
-                loss = criterion(emb1, emb2, labels)
-                
-                # Compute accuracy
-                accuracy = compute_accuracy(emb1, emb2, labels, threshold=0.5)
-            
-            # Update metrics
-            running_loss += loss.item()
-            running_accuracy += accuracy
-            
-            # Update progress bar
-            pbar.set_postfix({
-                'loss': f'{loss.item():.4f}',
-                'acc': f'{accuracy:.4f}'
-            })
-    
-    avg_loss = running_loss / num_batches
-    avg_accuracy = running_accuracy / num_batches
-    
-    return avg_loss, avg_accuracy
-
-
-def plot_training_history(history: dict, save_path: str):
-    """
-    Plot training and validation metrics.
-    
-    Args:
-        history: Dictionary with training history
-        save_path: Path to save the plot
-    """
-    epochs = range(1, len(history['train_loss']) + 1)
-    
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
-    
-    # Loss plot
-    ax1.plot(epochs, history['train_loss'], 'b-', label='Train Loss', linewidth=2)
-    ax1.plot(epochs, history['val_loss'], 'r-', label='Val Loss', linewidth=2)
-    ax1.set_xlabel('Epoch', fontsize=12)
-    ax1.set_ylabel('Loss', fontsize=12)
-    ax1.set_title('Training and Validation Loss', fontsize=14, fontweight='bold')
-    ax1.legend(fontsize=10)
-    ax1.grid(True, alpha=0.3)
-    
-    # Accuracy plot
-    ax2.plot(epochs, history['train_acc'], 'b-', label='Train Accuracy', linewidth=2)
-    ax2.plot(epochs, history['val_acc'], 'r-', label='Val Accuracy', linewidth=2)
-    ax2.set_xlabel('Epoch', fontsize=12)
-    ax2.set_ylabel('Accuracy', fontsize=12)
-    ax2.set_title('Training and Validation Accuracy', fontsize=14, fontweight='bold')
-    ax2.legend(fontsize=10)
-    ax2.grid(True, alpha=0.3)
-    ax2.set_ylim([0, 1])
-    
-    plt.tight_layout()
+    os.makedirs(output_dir, exist_ok=True)
+    save_path = os.path.join(output_dir, 'loss_plot.png')
     plt.savefig(save_path, dpi=300, bbox_inches='tight')
-    print(f"Training history plot saved to {save_path}")
-
-
-def save_checkpoint(
-    model: nn.Module,
-    optimizer: optim.Optimizer,
-    scheduler: optim.lr_scheduler._LRScheduler,
-    epoch: int,
-    best_val_loss: float,
-    history: dict,
-    save_path: str
-):
-    """
-    Save model checkpoint.
-    """
-    checkpoint = {
-        'epoch': epoch,
-        'model_state_dict': model.state_dict(),
-        'optimizer_state_dict': optimizer.state_dict(),
-        'scheduler_state_dict': scheduler.state_dict(),
-        'best_val_loss': best_val_loss,
-        'history': history
-    }
-    torch.save(checkpoint, save_path)
-    print(f"Checkpoint saved to {save_path}")
+    plt.close()
+    print(f"Loss plot saved to {save_path}")
 
 
 def train(
-    metadata_path: str,
-    img_dir: str,
+    metadata_path: str = 'data/train-metadata.csv',
+    img_dir: str = 'data/train-image',
     output_dir: str = 'outputs',
-    # Model hyperparameters
-    embedding_dim: int = 256,
-    backbone: str = 'resnet50',
-    pretrained: bool = True,
-    dropout: float = 0.5,
-    # Training hyperparameters
-    num_epochs: int = 30,
-    batch_size: int = 64,
-    learning_rate: float = 1e-4,
-    weight_decay: float = 1e-4,
-    val_split: float = 0.1,
-    # Learning rate scheduling
-    lr_scheduler: str = 'CosineAnnealingLR',  # Changed default
-    # For ReduceLROnPlateau (keep for backward compatibility):
-    lr_factor: float = 0.1,
-    lr_patience: int = 5,
-    lr_min: float = 1e-7,
-    # For CosineAnnealingLR (NEW):
-    T_max: Optional[int] = None,  # Defaults to num_epochs - lr_warmup_epochs
-    eta_min: float = 1e-7,  # Minimum LR
-    lr_warmup_epochs: int = 3,
-    lr_warmup_start: float = 1e-6,
-    # Class imbalance handling
-    loss_type: str = 'triplet',  # 'standard', 'weighted', 'focal', 'triplet'
-    pos_weight: float = 10.0,
-    focal_gamma: float = 2.0,
-    triplet_margin: float = 1.0,
-    samples_per_class: Optional[int] = 1000,
-    undersample_training: bool = True,
-    target_ratio: float = 1.0,
-    # Other settings
-    num_workers: int = 4,
-    random_seed: int = 42,
-    save_every: int = 5,
-    early_stopping_patience: int = 10,
-    patient_aware: bool = True
+    num_epochs: int = 100,
+    learning_rate: float = 1e-3,
+    margin: float = 1.0,
+    batch_size: int = 32,
+    num_workers: int = 4
 ):
     """
-    Main training function.
+    Train Siamese Network.
     
     Args:
-        metadata_path: Path to train-metadata.csv
+        metadata_path: Path to metadata CSV
         img_dir: Path to image directory
         output_dir: Directory to save outputs
-        embedding_dim: Dimension of embedding space
-        backbone: Backbone architecture
-        pretrained: Use pretrained weights
-        dropout: Dropout rate
         num_epochs: Number of training epochs
+        learning_rate: Learning rate
+        margin: Margin for triplet loss
         batch_size: Batch size
-        learning_rate: Initial learning rate
-        weight_decay: Weight decay for optimizer
-        val_split: Validation split ratio
-        lr_scheduler: Learning rate scheduler type
-        lr_factor: Factor to reduce LR on plateau (0.1 = aggressive)
-        lr_patience: Epochs to wait before reducing LR
-        lr_min: Minimum learning rate
-        lr_warmup_epochs: Number of epochs for warmup (gradual LR increase)
-        lr_warmup_start: Starting LR for warmup phase
-        loss_type: Type of loss ('standard', 'weighted', 'focal', 'triplet')
-        pos_weight: Weight for positive pairs (weighted loss)
-        focal_gamma: Gamma parameter (focal loss)
-        triplet_margin: Margin for triplet loss
-        samples_per_class: Number of samples per class per epoch (for triplet loss)
-        undersample_training: If True, balance ONLY training set (CRITICAL)
-        target_ratio: Target ratio for undersampling (1.0 = balanced)
         num_workers: Number of data loading workers
-        random_seed: Random seed
-        save_every: Save checkpoint every N epochs
-        early_stopping_patience: Stop training if no improvement for N epochs
-        patient_aware: If True, split by patient_id to prevent data leakage
     """
-    # Set random seed for reproducibility
-    torch.manual_seed(random_seed)
-    np.random.seed(random_seed)
-    
-    # Create output directory
+    # Setup
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     os.makedirs(output_dir, exist_ok=True)
     
-    # Set device
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    print(f"\n{'='*70}")
-    print(f"Training Siamese Network for Melanoma Classification")
-    print(f"{'='*70}")
+    print("=" * 70)
+    print("Training Siamese Network")
+    print("=" * 70)
     print(f"Device: {device}")
-    print(f"Backbone: {backbone}")
-    print(f"Embedding Dimension: {embedding_dim}")
-    print(f"Loss Type: {loss_type}")
-    if loss_type == 'triplet':
-        print(f"Triplet Margin: {triplet_margin}")
-        print(f"Using Class-Balanced Triplet Sampling")
-    print(f"Batch Size: {batch_size}")
+    print(f"Epochs: {num_epochs}")
     print(f"Learning Rate: {learning_rate}")
-    print(f"Number of Epochs: {num_epochs}")
-    print(f"{'='*70}\n")
+    print(f"Triplet Margin: {margin}")
+    print(f"Batch Size: {batch_size}")
+    print("=" * 70)
     
-    # Create data loaders
-    print("Loading data...")
-    use_triplet = (loss_type == 'triplet')
-    train_loader, val_loader, _ = create_data_loaders(  # We don't use test set during training
-        metadata_path=metadata_path,
-        img_dir=img_dir,
-        val_split=val_split,
-        test_split=0.1,  # 10% for test set
-        batch_size=batch_size,
-        num_workers=num_workers,
-        random_state=random_seed,
-        verbose=True,
-        use_triplet=use_triplet,
-        samples_per_class=samples_per_class,
-        patient_aware=patient_aware,
-        undersample_training=undersample_training,
-        target_ratio=target_ratio
-    )
+    # Load data
+    print("\nLoading data...")
+    train_loader, test_loader, val_loader = get_dataloaders()
+    print(f"Train batches: {len(train_loader)}")
+    print(f"Val batches: {len(val_loader)}")
+    print(f"Test batches: {len(test_loader)}")
     
-    # Create model
-    print(f"\nCreating model...")
-    model, _ = get_model(
-        embedding_dim=embedding_dim,
-        backbone=backbone,
-        pretrained=pretrained,
-        dropout=dropout,
-        device=device
-    )
+    # Initialize model
+    print("\nInitializing model...")
+    siamese = SiameseNetwork().to(device)
+    tripletloss = TripletMarginLoss(margin=margin)
+    optimizer = Adam(siamese.parameters(), lr=learning_rate)
     
-    # Count parameters
-    total_params = sum(p.numel() for p in model.parameters())
-    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    total_params = sum(p.numel() for p in siamese.parameters())
     print(f"Total parameters: {total_params:,}")
-    print(f"Trainable parameters: {trainable_params:,}")
-    
-    # Create loss function based on type
-    print(f"\nCreating {loss_type} loss function...")
-    if loss_type == 'standard':
-        criterion = ContrastiveLoss(margin=1.0)
-    elif loss_type == 'weighted':
-        criterion = WeightedContrastiveLoss(margin=1.0, pos_weight=pos_weight)
-        print(f"  Positive pair weight: {pos_weight}")
-    elif loss_type == 'focal':
-        criterion = FocalContrastiveLoss(margin=1.0, gamma=focal_gamma)
-        print(f"  Focal gamma: {focal_gamma}")
-    elif loss_type == 'triplet':
-        criterion = TripletLoss(margin=triplet_margin)
-        print(f"  Triplet margin: {triplet_margin}")
-    else:
-        raise ValueError(f"Unknown loss type: {loss_type}")
-    
-    # Create optimizer
-    optimizer = optim.AdamW(
-        model.parameters(),
-        lr=learning_rate,
-        weight_decay=weight_decay
-    )
-    
-    # Create learning rate scheduler
-    print(f"\nCreating learning rate scheduler...")
-    print(f"  Type: {lr_scheduler}")
-    print(f"  Initial LR: {learning_rate:.2e}")
-    
-    if lr_warmup_epochs > 0:
-        print(f"  Warmup: {lr_warmup_epochs} epochs ({lr_warmup_start:.2e} → {learning_rate:.2e})")
-    
-    if lr_scheduler == 'CosineAnnealingLR':
-        # Calculate T_max (exclude warmup epochs)
-        if T_max is None:
-            T_max = num_epochs - lr_warmup_epochs
-        
-        print(f"  Cosine Annealing:")
-        print(f"    T_max: {T_max} epochs (full cycle)")
-        print(f"    eta_min: {eta_min:.2e} (minimum LR at end)")
-        print(f"    Smooth decay over {T_max} epochs")
-        
-        scheduler = CosineAnnealingLR(
-            optimizer,
-            T_max=T_max,
-            eta_min=eta_min
-        )
-        
-    elif lr_scheduler == 'ReduceLROnPlateau':
-        print(f"  ReduceLROnPlateau:")
-        print(f"    Factor: {lr_factor} (LR multiplied by this on plateau)")
-        print(f"    Patience: {lr_patience} epochs")
-        print(f"    Min LR: {lr_min:.2e}")
-        
-        scheduler = ReduceLROnPlateau(
-            optimizer,
-            mode='min',
-            factor=lr_factor,
-            patience=lr_patience,
-            min_lr=lr_min
-        )
-    else:
-        raise ValueError(f"Unsupported scheduler: {lr_scheduler}")
-    
-    # Calculate warmup schedule
-    def get_warmup_lr(epoch: int) -> float:
-        """Calculate learning rate for warmup phase."""
-        if epoch >= lr_warmup_epochs:
-            return learning_rate
-        # Linear warmup from lr_warmup_start to learning_rate
-        return lr_warmup_start + (learning_rate - lr_warmup_start) * (epoch / lr_warmup_epochs)
-    
-    # Training history
-    history = {
-        'train_loss': [],
-        'train_acc': [],
-        'val_loss': [],
-        'val_acc': [],
-        'lr': []
-    }
     
     # Training loop
+    train_loss = []
+    val_loss = []
     best_val_loss = float('inf')
-    best_val_acc = 0.0
-    epochs_without_improvement = 0
     
-    print(f"\n{'='*70}")
-    print(f"Starting Training")
-    print(f"{'='*70}")
-    print(f"Early Stopping Patience: {early_stopping_patience} epochs")
-    print(f"{'='*70}\n")
+    print("\n" + "=" * 70)
+    print("Starting Training")
+    print("=" * 70)
     
-    for epoch in range(1, num_epochs + 1):
-        # Apply warmup learning rate (overrides scheduler during warmup phase)
-        if epoch <= lr_warmup_epochs:
-            warmup_lr = get_warmup_lr(epoch - 1)  # epoch-1 because we use 0-indexing
-            for param_group in optimizer.param_groups:
-                param_group['lr'] = warmup_lr
-            print(f"Warmup Phase: Epoch {epoch}/{lr_warmup_epochs}, LR = {warmup_lr:.2e}")
+    start_time = time.time()
+    
+    for epoch in range(num_epochs):
+        # Training
+        siamese.train()
+        t_loss_total = []
         
-        # Train
-        train_loss, train_acc = train_one_epoch(
-            model, train_loader, criterion, optimizer, device, epoch, num_epochs, use_triplet
-        )
+        for i, (anchor, positive, negative, label) in enumerate(train_loader):
+            optimizer.zero_grad()
+            loss = process_batch(siamese, tripletloss, anchor, positive, negative, device)
+            loss.backward()
+            optimizer.step()
+            
+            t_loss_total.append(loss.item())
+            
+            if i % (len(train_loader) // 4) == 0 and i != len(train_loader) - 1:
+                print(f"Epoch: {epoch + 1}/{num_epochs}, Batch: {i}, Loss: {loss.item():.4f}")
         
-        # Validate
-        val_loss, val_acc = validate(
-            model, val_loader, criterion, device, epoch, num_epochs, use_triplet
-        )
+        # Validation
+        siamese.eval()
+        v_loss_total = []
         
-        # Update learning rate (only after warmup phase)
-        if epoch > lr_warmup_epochs:
-            if lr_scheduler == 'CosineAnnealingLR':
-                scheduler.step()  # CosineAnnealingLR doesn't need validation loss
-            elif lr_scheduler == 'ReduceLROnPlateau':
-                scheduler.step(val_loss)  # ReduceLROnPlateau needs validation loss
-                
-        current_lr = optimizer.param_groups[0]['lr']
+        with torch.no_grad():
+            for i, (anchor, positive, negative, label) in enumerate(val_loader):
+                loss = process_batch(siamese, tripletloss, anchor, positive, negative, device)
+                v_loss_total.append(loss.item())
         
-        # Update history
-        history['train_loss'].append(train_loss)
-        history['train_acc'].append(train_acc)
-        history['val_loss'].append(val_loss)
-        history['val_acc'].append(val_acc)
-        history['lr'].append(current_lr)
+        # Record losses
+        avg_train_loss = sum(t_loss_total) / len(t_loss_total)
+        avg_val_loss = sum(v_loss_total) / len(v_loss_total)
+        train_loss.append(avg_train_loss)
+        val_loss.append(avg_val_loss)
         
-        # Print epoch summary
-        print(f"\nEpoch {epoch}/{num_epochs} Summary:")
-        print(f"  Train Loss: {train_loss:.4f} | Train Acc: {train_acc:.4f}")
-        print(f"  Val Loss:   {val_loss:.4f} | Val Acc:   {val_acc:.4f}")
-        print(f"  Learning Rate: {current_lr:.2e}")
+        print(f"\nEpoch {epoch + 1}/{num_epochs} Summary:")
+        print(f"  Train Loss: {avg_train_loss:.4f}")
+        print(f"  Val Loss: {avg_val_loss:.4f}")
         
         # Save best model
-        if val_loss < best_val_loss:
-            best_val_loss = val_loss
-            best_val_acc = val_acc
-            epochs_without_improvement = 0
+        if avg_val_loss < best_val_loss:
+            best_val_loss = avg_val_loss
             save_path = os.path.join(output_dir, 'best_model.pth')
-            torch.save(model.state_dict(), save_path)
-            print(f"  ✓ New best model saved! (Val Loss: {val_loss:.4f})")
-        else:
-            epochs_without_improvement += 1
-            print(f"  No improvement for {epochs_without_improvement} epoch(s)")
+            torch.save(siamese.state_dict(), save_path)
+            print(f"  ✓ New best model saved! (Val Loss: {avg_val_loss:.4f})")
         
-        # Save checkpoint periodically
-        if epoch % save_every == 0:
-            checkpoint_path = os.path.join(output_dir, f'checkpoint_epoch_{epoch}.pth')
-            save_checkpoint(model, optimizer, scheduler, epoch, best_val_loss, history, checkpoint_path)
-        
-        print(f"{'-'*70}\n")
-        
-        # Early stopping check
-        if epochs_without_improvement >= early_stopping_patience:
-            print(f"\n{'='*70}")
-            print(f"Early stopping triggered after {epoch} epochs")
-            print(f"No improvement in validation loss for {early_stopping_patience} consecutive epochs")
-            print(f"{'='*70}\n")
-            break
+        print("-" * 70)
+    
+    end_time = time.time()
+    training_time = (end_time - start_time) / 60
+    
+    print(f"\nTraining complete! It took {training_time:.2f} minutes")
+    
+    # Testing
+    print("\nTesting the model...")
+    siamese.eval()
+    test_loss_total = []
+    
+    with torch.no_grad():
+        for i, (anchor, positive, negative, label) in enumerate(test_loader):
+            loss = process_batch(siamese, tripletloss, anchor, positive, negative, device)
+            test_loss_total.append(loss.item())
+            
+            if i % (len(test_loader) // 2) == 0 and i != len(test_loader) - 1:
+                print(f"Testing: Batch: {i}, Loss: {loss.item():.4f}")
+    
+    avg_test_loss = sum(test_loss_total) / len(test_loss_total)
+    print(f"\nTest Loss: {avg_test_loss:.4f}")
     
     # Save final model
     final_model_path = os.path.join(output_dir, 'final_model.pth')
-    torch.save(model.state_dict(), final_model_path)
-    print(f"\nFinal model saved to {final_model_path}")
+    torch.save(siamese.state_dict(), final_model_path)
+    print(f"Final model saved to {final_model_path}")
     
-    # Save training history
-    history_path = os.path.join(output_dir, 'training_history.json')
-    with open(history_path, 'w') as f:
-        json.dump(history, f, indent=4)
-    print(f"Training history saved to {history_path}")
-    
-    # Plot training history
-    plot_path = os.path.join(output_dir, 'training_history.png')
-    plot_training_history(history, plot_path)
+    # Generate loss plot
+    generate_loss_plot(train_loss, val_loss, output_dir)
     
     # Print final summary
-    print(f"\n{'='*70}")
-    print(f"Training Complete!")
-    print(f"{'='*70}")
+    print("\n" + "=" * 70)
+    print("Training Complete!")
+    print("=" * 70)
     print(f"Best Validation Loss: {best_val_loss:.4f}")
-    print(f"Best Validation Accuracy: {best_val_acc:.4f}")
+    print(f"Final Test Loss: {avg_test_loss:.4f}")
+    print(f"Training Time: {training_time:.2f} minutes")
     print(f"Output directory: {output_dir}")
-    print(f"{'='*70}\n")
+    print("=" * 70)
 
 
 if __name__ == "__main__":
-    # ==========================================================================
-    # TRAINING CONFIGURATION
-    # Edit these parameters to configure training without command-line arguments
-    # ==========================================================================
+    # Configuration
+    METADATA_PATH = 'data/train-metadata.csv'
+    IMG_DIR = 'data/train-image'
+    OUTPUT_DIR = 'outputs'
     
-    # Data paths
-    metadata_path = 'data/train-metadata.csv'      # Path to train-metadata.csv
-    img_dir = 'data/train-image'                   # Path to image directory
-    output_dir = 'outputs'                         # Directory to save outputs
+    # Training parameters
+    NUM_EPOCHS = 100
+    LEARNING_RATE = 1e-3
+    MARGIN = 1.0
+    BATCH_SIZE = 32
+    NUM_WORKERS = 4
     
-    # Model hyperparameters
-    embedding_dim = 512                            # Embedding dimension (increased from 384 for more capacity)
-    backbone = 'resnet50'                          # Backbone: 'resnet50', 'resnet34', 'efficientnet_b0'
-    pretrained = True                              # Use pretrained ImageNet weights
-    dropout = 0.5                                  # Dropout rate (reduced from 0.6 for less aggressive regularization)
-    
-    # Training hyperparameters
-    num_epochs = 120                               # Number of training epochs (increased for 1x repetition)
-    batch_size = 64                                # Batch size (increased from 48 for better gradients, use 48 if GPU limited)
-    learning_rate = 5e-5                           # Initial learning rate (increased from 3e-5)
-    weight_decay = 3e-4                            # Weight decay for optimizer (reduced from 1e-3 for less aggressive L2)
-    val_split = 0.1                                # Validation split ratio (0.1 = 10%)
-    
-    # Learning rate scheduling - COSINE ANNEALING (NEW DEFAULT)
-    lr_scheduler = 'CosineAnnealingLR'             # Changed from 'ReduceLROnPlateau'
-    T_max = 115                                    # Auto-calculated as num_epochs - lr_warmup_epochs
-    eta_min = 1e-7                                 # Minimum LR at end of training
-    
-    # Warmup configuration
-    lr_warmup_epochs = 5                           # Warmup for 5 epochs
-    lr_warmup_start = 1e-6                         # Start warmup from very low LR
-    
-    # Class imbalance handling - KEY CHANGES
-    loss_type = 'triplet'                          # Loss type: 'standard', 'weighted', 'focal', 'triplet'
-    pos_weight = 10.0                              # Weight for positive pairs (weighted loss only)
-    focal_gamma = 2.0                              # Gamma parameter (focal loss only)
-    triplet_margin = 1.0                           # Margin for triplet loss (increased from 0.5 for harder constraint)
-    samples_per_class = None                       # Samples per class per epoch (auto-calculate with 25% coverage)
-    undersample_training = True                    # ⚠️ CRITICAL: Balance ONLY training set (val/test remain imbalanced)
-    target_ratio = 1.0                             # Target ratio for undersampling (1:1 TRUE balance)
-    
-    # Other settings
-    num_workers = 4                                # Number of data loading workers (increased from 1 for better loading)
-    random_seed = 42                               # Random seed for reproducibility
-    save_every = 10                                # Save checkpoint every N epochs (less frequent, increased from 5)
-    early_stopping_patience = 30                   # Stop if no improvement for N epochs (increased for 1x repetition)
-    patient_aware = False                          # ⚠️ CRITICAL: Image-level undersampling for exact 1:1 balance
-    
-    # ==========================================================================
-    # Run training with the above configuration
-    # ==========================================================================
+    # Run training
     train(
-        metadata_path=metadata_path,
-        img_dir=img_dir,
-        output_dir=output_dir,
-        embedding_dim=embedding_dim,
-        backbone=backbone,
-        pretrained=pretrained,
-        dropout=dropout,
-        num_epochs=num_epochs,
-        batch_size=batch_size,
-        learning_rate=learning_rate,
-        weight_decay=weight_decay,
-        val_split=val_split,
-        lr_scheduler=lr_scheduler,
-        T_max=T_max,  # NEW
-        eta_min=eta_min,  # NEW
-        lr_warmup_epochs=lr_warmup_epochs,
-        lr_warmup_start=lr_warmup_start,
-        loss_type=loss_type,
-        pos_weight=pos_weight,
-        focal_gamma=focal_gamma,
-        triplet_margin=triplet_margin,
-        samples_per_class=samples_per_class,
-        undersample_training=undersample_training,
-        target_ratio=target_ratio,
-        num_workers=num_workers,
-        random_seed=random_seed,
-        save_every=save_every,
-        early_stopping_patience=early_stopping_patience,
-        patient_aware=patient_aware
+        metadata_path=METADATA_PATH,
+        img_dir=IMG_DIR,
+        output_dir=OUTPUT_DIR,
+        num_epochs=NUM_EPOCHS,
+        learning_rate=LEARNING_RATE,
+        margin=MARGIN,
+        batch_size=BATCH_SIZE,
+        num_workers=NUM_WORKERS
     )
