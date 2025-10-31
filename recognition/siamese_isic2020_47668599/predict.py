@@ -3,7 +3,6 @@ Inference script for Siamese Network + Binary Classifier melanoma classification
 Evaluates on test set and reports comprehensive metrics.
 """
 
-import argparse
 import matplotlib.pyplot as plt
 from sklearn.metrics import (
     ConfusionMatrixDisplay, 
@@ -202,55 +201,21 @@ def predict(
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(
-        description="Inference with Siamese Network + Binary Classifier",
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter
-    )
-    parser.add_argument(
-        "siamese", 
-        help="Path to Siamese network weights (e.g., outputs/best_siamese.pth)"
-    )
-    parser.add_argument(
-        "classifier", 
-        help="Path to binary classifier weights (e.g., outputs/best_classifier.pth)"
-    )
-    parser.add_argument(
-        "--metadata", 
-        default="data/train-metadata.csv", 
-        help="Path to metadata CSV"
-    )
-    parser.add_argument(
-        "--img_dir", 
-        default="data/train-image", 
-        help="Path to image directory"
-    )
-    parser.add_argument(
-        "--batch_size", 
-        type=int, 
-        default=32, 
-        help="Batch size for inference"
-    )
-    parser.add_argument(
-        "--num_workers", 
-        type=int, 
-        default=4, 
-        help="Number of data loading workers"
-    )
-    parser.add_argument(
-        "--output_dir",
-        default="outputs",
-        help="Directory to save results"
-    )
-    
-    args = parser.parse_args()
+    SIAMESE_PATH = "outputs/best_siamese.pth"
+    CLASSIFIER_PATH = "outputs/best_classifier.pth"
+    METADATA_PATH = "data/train-metadata.csv"
+    IMG_DIR = "data/train-image"
+    BATCH_SIZE = 32
+    NUM_WORKERS = 4
+    OUTPUT_DIR = "outputs"
     
     # Run prediction
     predict(
-        siamese_path=args.siamese,
-        classifier_path=args.classifier,
-        metadata_path=args.metadata,
-        img_dir=args.img_dir,
-        batch_size=args.batch_size,
-        num_workers=args.num_workers,
-        output_dir=args.output_dir
+        siamese_path=SIAMESE_PATH,
+        classifier_path=CLASSIFIER_PATH,
+        metadata_path=METADATA_PATH,
+        img_dir=IMG_DIR,
+        batch_size=BATCH_SIZE,
+        num_workers=NUM_WORKERS,
+        output_dir=OUTPUT_DIR
     )

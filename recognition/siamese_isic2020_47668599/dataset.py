@@ -95,7 +95,8 @@ class ISICTripletDataset(Dataset):
             positive = self.transform(positive)
             negative = self.transform(negative)
         
-        return anchor, positive, negative, torch.tensor(0)
+        anchor_label = self.df.iloc[anchor_idx]['target']
+        return anchor, positive, negative, torch.tensor(anchor_label, dtype=torch.long)
 
 
 def load_and_split_data(metadata_path: str, random_state: int = 42) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
@@ -119,11 +120,13 @@ def get_transforms(train: bool = True, img_size: int = 224):
             transforms.RandomHorizontalFlip(p=0.5),
             transforms.RandomVerticalFlip(p=0.5),
             transforms.ToTensor(),
+            transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
         ])
     else:
         return transforms.Compose([
             transforms.Resize((img_size, img_size)),
             transforms.ToTensor(),
+            transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
         ])
 
 
