@@ -27,7 +27,6 @@ Melanoma detection requires high sensitivity to minimize missed diagnoses. The I
 - **Loss:** Triplet margin loss (margin = `1.0`), $$L_{\text{triplet}} = \max(0, ||a-p||_2 - ||a-n||_2 + 1.0)$$
 - **Training config:** epochs = `180`, optimizer = Adam (`lr = 1e-4`), batch size = `32`
 - **Sampling:** `WeightedRandomSampler` for balanced batches; triplets sampled randomly within stratified labels
-- **Outputs:** loss curve → `outputs/siamese_loss.png`, weights → `outputs/best_siamese.pth`
 
 #### Stage 2 – Binary Classification
 
@@ -35,7 +34,6 @@ Melanoma detection requires high sensitivity to minimize missed diagnoses. The I
 - **Loss:** Weighted Cross-Entropy (class weights = `[1.0, 10.0]`)
 - **Training config:** epochs = `140`, optimizer = Adam (`lr = 5e-4`), batch size = `32`
 - **Decision rule:** `argmax` over logits; probabilities via `softmax` for analysis and thresholding if needed
-- **Outputs:** loss curve → `outputs/classifier_weighted_loss.png`, weights → `outputs/best_classifier.pth`, confusion matrix (via inference) → `outputs/test_confusion_matrix.png`
 - **Rationale:** decoupling representation learning (Stage 1) from decision optimisation (Stage 2) improves sensitivity for the minority class under severe imbalance
 
 ### Data Pre-processing
