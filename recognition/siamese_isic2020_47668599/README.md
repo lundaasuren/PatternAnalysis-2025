@@ -1,123 +1,209 @@
 # Siamese Network for Melanoma Classification
 
-## Project Overview
+## Overview
 
-This project implements a **Siamese Neural Network** to classify dermoscopic images from the ISIC 2020 Challenge dataset as either normal (benign) or melanoma (malignant). Siamese networks are particularly well-suited for this task as they learn to differentiate between classes by comparing pairs of images and learning a similarity metric, which is valuable in medical imaging where we want the model to learn discriminative features between subtle visual differences.
+This project implements a two-stage Siamese neural network pipeline for binary melanoma classification on the ISIC 2020 dataset. The approach combines metric learning via triplet loss with weighted cross-entropy classification to address extreme class imbalance (98% benign vs 2% melanoma), achieving 80.22% accuracy and 67.82% sensitivity on the test set.
 
 ## Problem Statement
 
-Melanoma is one of the most dangerous forms of skin cancer, and early detection is critical for successful treatment. The ISIC 2020 Kaggle Challenge provides a large-scale dataset of dermoscopic images for binary classification (normal vs melanoma). The challenge lies in:
+Melanoma detection requires high sensitivity to minimize missed diagnoses. The ISIC 2020 dataset presents a challenging imbalanced classification task with 33,126 samples (benign = 32,542, melanoma = 584). Traditional classifiers bias toward the majority class; this work applies Siamese networks with batch-hard triplet mining and weighted loss to prioritise melanoma detection.
 
-- **Class imbalance**: The dataset contains significantly more benign samples than melanoma cases
-- **Visual similarity**: Many benign lesions share visual characteristics with melanoma
-- **Subtle features**: Distinguishing features can be subtle and require learning robust representations
+## Methodology
 
-**Goal**: Achieve a minimum accuracy of 0.8 on the test set using a Siamese network architecture.
+### Architecture
 
-## Dataset
+**Algorithm and problem (what it addresses):** Melanoma screening poses a highly imbalanced recognition problem where the minority class (malignant) is rare but clinically critical to detect. Direct supervised training often biases toward the majority (benign) class, hurting sensitivity. A Siamese metric-learning stage mitigates this by learning an embedding where images from the same class lie close together while images from different classes are far apart. Using triplet loss on (anchor, positive, negative) examples, the representation becomes more class-separable, so a small classifier trained afterward can prioritise recall of melanoma without collapsing to the majority class.
 
-- **Source**: [ISIC 2020 JPG 224x224 Resized](https://www.kaggle.com/datasets/nischaydnk/isic-2020-jpg-224x224-resized)
-- **Format**: Pre-resized 224x224 RGB images
-- **Classes**: Binary classification (0 = benign, 1 = melanoma)
-- **Size**: ~33,000 training images with significant class imbalance
+**How it works (high level):** Stage 1 trains a ResNet-50 based Siamese network with triplet loss using randomly sampled triplets from stratified splits and a balanced sampler, producing a 1000-D embedding. The network learns a distance-aware feature space where intra-class distances shrink and inter-class distances expand. Stage 2 freezes the embedding and trains a lightweight multilayer classifier with class-weighted cross-entropy (malignant up-weighted) so that the decision boundary reflects clinical priorities. At inference, a single image is passed through the feature extractor and then the classifier to obtain class logits and probabilities; evaluation uses confusion matrices and sensitivity/specificity metrics aligned with screening use.
 
-## How Siamese Networks Work
+![Overview of the Siamese Neural Network architecture using triplet loss function.](outputs/Overview-of-the-Siamese-Neural-Network-architecture-using-triplet-loss-function.png)
 
-A Siamese network consists of two identical neural networks (sharing the same weights) that process pairs of images simultaneously. The network learns to:
+<sub>**Figure:** Overview of the Siamese Neural Network architecture using triplet loss function. Source: Promoting Social Media Dissemination of Digital Images Through CBR-Based Tag Recommendation — Scientific Figure on ResearchGate. Available from: [https://www.researchgate.net/figure/Overview-of-the-Siamese-Neural-Network-architecture-using-triplet-loss-function_fig1_363780514](https://www.researchgate.net/figure/Overview-of-the-Siamese-Neural-Network-architecture-using-triplet-loss-function_fig1_363780514) [accessed 1 Nov 2025]</sub>
 
-1. **Extract features** from both images using a shared CNN backbone
-2. **Compute embeddings** in a latent space where similar images are close together
-3. **Calculate similarity** using distance metrics (e.g., Euclidean distance, cosine similarity)
-4. **Classify** based on whether the pair belongs to the same class or different classes
+#### Stage 1 – Siamese Feature Extraction
 
-During inference, we can compare a query image against reference examples from each class and classify based on similarity scores.
+- **Backbone:** ResNet-50 (random initialization)
+- **Embedding size:** 1000-D
+- **Loss:** Triplet margin loss (margin = `1.0`), $$L_{\text{triplet}} = \max(0, ||a-p||_2 - ||a-n||_2 + 1.0)$$
+- **Training config:** epochs = `180`, optimizer = Adam (`lr = 1e-4`), batch size = `32`
+- **Sampling:** `WeightedRandomSampler` for balanced batches; triplets sampled randomly within stratified labels
+- **Outputs:** loss curve → `outputs/siamese_loss.png`, weights → `outputs/best_siamese.pth`
 
-## Initial Implementation Plan
+#### Stage 2 – Binary Classification
 
-### 1. **Data Preprocessing & Augmentation** (`dataset.py`)
-   - Load resized 224x224 images from the Kaggle dataset
-   - Implement pair generation strategy:
-     - Positive pairs: Same class (both benign or both melanoma)
-     - Negative pairs: Different classes (one benign, one melanoma)
-   - Handle class imbalance through strategic pair sampling
-   - Apply data augmentation: rotation, flipping, color jittering, normalization
+- **Architecture:** Frozen embeddings → FC (1000 → 500 → 100 → 50 → 2)
+- **Loss:** Weighted Cross-Entropy (class weights = `[1.0, 10.0]`)
+- **Training config:** epochs = `140`, optimizer = Adam (`lr = 5e-4`), batch size = `32`
+- **Decision rule:** `argmax` over logits; probabilities via `softmax` for analysis and thresholding if needed
+- **Outputs:** loss curve → `outputs/classifier_weighted_loss.png`, weights → `outputs/best_classifier.pth`, confusion matrix (via inference) → `outputs/test_confusion_matrix.png`
+- **Rationale:** decoupling representation learning (Stage 1) from decision optimisation (Stage 2) improves sensitivity for the minority class under severe imbalance
 
-### 2. **Model Architecture** (`modules.py`)
-   - **Backbone Network**: 
-     - Start with ResNet-50 or EfficientNet-B0 (pre-trained on ImageNet)
-     - Consider MobileNetV2 for efficiency
-   - **Embedding Network**: 
-     - Fully connected layers to project features to embedding space (128-512 dimensions)
-     - Batch normalization and dropout for regularization
-   - **Similarity/Distance Module**:
-     - Euclidean distance or cosine similarity computation
-     - Contrastive loss or triplet loss function
+### Data Pre-processing
 
-### 3. **Training Pipeline** (`train.py`)
-   - Implement contrastive loss: `L = (1-Y) * D² + Y * max(margin - D, 0)²`
-     - Where Y=1 for dissimilar pairs, Y=0 for similar pairs
-     - D is the distance between embeddings
-   - Alternative: Triplet loss with online hard negative mining
-   - Training strategy:
-     - Batch size: 32-64 pairs
-     - Optimizer: Adam with learning rate scheduling
-     - Monitor both loss and accuracy metrics
-   - Data split: 80/10/10 train/validation/test
-   - Plot training/validation loss and accuracy curves
+- Input: RGB 224 × 224 px
+- Normalisation: mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5]
+- Augmentation: Random horizontal/vertical flips (training only)
+- Sampling: WeightedRandomSampler for 1:1 batch ratio
 
-### 4. **Evaluation & Prediction** (`predict.py`)
-   - For classification, compare query image against:
-     - Option A: k-nearest neighbors in embedding space
-     - Option B: Reference set of prototypes from each class
-   - Calculate metrics:
-     - Accuracy, Precision, Recall, F1-score
-     - ROC-AUC (important for imbalanced medical data)
-     - Confusion matrix
-   - Visualize:
-     - Embedding space using t-SNE or UMAP
-     - Example pairs with similarity scores
-     - Misclassified examples for error analysis
+![Siamese Training/Validation Loss](outputs/siamese_loss.png)
 
-### 5. **Expected Challenges**
-   - **Class imbalance**: Use weighted sampling or focal loss
-   - **Pair generation**: Ensure balanced positive/negative pairs
-   - **Computational cost**: Siamese networks require processing pairs, doubling batch processing
-   - **Hyperparameter tuning**: Margin for contrastive loss, embedding dimension, learning rate
+### Splits and Justification
 
-### 6. **Success Metrics**
-   - Primary: Test accuracy ≥ 0.8
-   - Secondary: High recall for melanoma class (minimize false negatives)
-   - Qualitative: Embeddings should show clear class separation
+- Stratified 70/15/15 train/val/test split ensures class distribution is preserved across splits for fair evaluation under severe imbalance. Stratification reduces variance in sensitivity estimates for the minority class and prevents optimistic bias that can arise from random splits without class constraints.
 
-## Dependencies (Preliminary)
+## Experimental Results
 
-```
-- Python 3.8+
-- PyTorch 2.0+ / TensorFlow 2.x
-- torchvision / tensorflow-datasets
-- numpy
-- pandas
-- scikit-learn
-- matplotlib
-- seaborn
-- tqdm
-- pillow
-- albumentations (for advanced augmentation)
-```
+### Configuration
 
-## Repository Structure
+| Component | Epochs | Loss | Best Val Loss | LR | Time |
+|:--|:--:|:--|:--:|:--:|:--:|
+| Siamese | 180 | Triplet (margin=1.0) | 0.7183 | 1e-4 | 121.5 min |
+| Classifier | 140 | Weighted CE | 0.5607 | 5e-4 | 0.18 min |
+
+### Test Performance (4,969 samples)
+
+| Metric | Value |
+|:--|:--:|
+| Accuracy | 80.22% |
+| Sensitivity | 67.82% |
+| Specificity | 80.44% |
+| Precision | 5.82% |
+| F1-score | 0.1072 |
+
+![Test Confusion Matrix](outputs/test_confusion_matrix.png)
+
+Confusion Matrix: TN=3,927, FP=955, FN=28, TP=59
+
+### Class Weight Trade-off Analysis
+
+| Weight | Accuracy | Sensitivity | Specificity |
+|:--:|:--:|:--:|:--:|
+| 1 | 89.07% | 43.68% | 89.88% |
+| **10** | **80.22%** | **67.82%** | **80.44%** |
+| 25 | ~65% | ~88% | ~65% |
+
+The 24 percentage point sensitivity improvement (unweighted → weighted) justifies reduced specificity for clinical screening applications.
+
+![Classifier (Weighted) Train/Val Loss](outputs/classifier_weighted_loss.png)
+
+![Confusion Matrix (Weighted)](outputs/confusion_matrix_weighted.png)
+
+## Design Justification
+
+**Two-Stage Decoupling:** Separating metric learning from decision boundaries improves generalisation under severe imbalance. Stage 1 learns discriminative embeddings via triplet loss; Stage 2 optimises classification on frozen features without competing objectives.
+
+**Triplet Sampling:** Random triplet sampling per-epoch with stratified labels provides diverse positive/negative pairs without added complexity, working well with the weighted classifier to reduce false negatives.
+
+**Class Weighting:** Weight factor = 10 balances melanoma detection (clinical priority) against false positive minimisation, enabling deployment as a screening aid.
+
+## Dependencies
 
 ```
-siamese_melanoma_classifier_[YOUR_ID]/
-├── modules.py          # Siamese network architecture
-├── dataset.py          # Data loading and pair generation
-├── train.py           # Training script with validation
-├── predict.py         # Inference and evaluation
-├── utils.py           # Helper functions (optional)
-├── README.md          # This file
-└── results/           # Saved models, plots, and outputs
+Python >= 3.10
+PyTorch >= 2.0
+Torchvision >= 0.15
+NumPy >= 1.24
+Scikit-learn >= 1.3
+Matplotlib >= 3.7
+Pandas >= 2.0
+Pillow >= 10.0
 ```
+
+## Usage
+
+```bash
+python train.py      # Two-stage training
+python predict.py    # Inference and metrics
+```
+
+### Examples
+
+- Example metadata CSV (`data/train-metadata.csv`):
+
+```csv
+image_name,target
+ISIC_0000010,0
+ISIC_0000011,1
+ISIC_0000012,0
+```
+
+- Example inference call (Python):
+
+```python
+from predict import predict
+
+predict(
+    siamese_path="outputs/best_siamese.pth",
+    classifier_path="outputs/best_classifier.pth",
+    metadata_path="data/train-metadata.csv",
+    img_dir="data/train-image",
+    batch_size=32,
+    num_workers=4,
+    output_dir="outputs",
+)
+```
+
+## File Structure
+
+```
+siamese_melanoma/
+├── modules.py                      # Siamese + Classifier architectures
+├── dataset.py                      # Data loading, sampling, transforms
+├── train.py                        # Training pipeline
+├── predict.py                      # Inference script
+├── outputs/
+│   ├── siamese_loss.png            # Stage 1 convergence
+│   ├── classifier_weighted_loss.png # Stage 2 convergence (weighted)
+│   ├── test_confusion_matrix.png   # Metrics overlay (predict.py)
+│   ├── confusion_matrix_weighted.png # Confusion matrix for weighted run
+│   ├── training_summary.txt
+│   ├── test_results.txt
+│   └── weighted_classifier_summary.txt
+└── README.md
+```
+
+## Reproducibility
+
+- Stratified splits use a fixed `random_state` (42) for repeatable data partitions
+- Model weights are saved (`best_*.pth`) to reuse across runs
+- Stratified 70/15/15 train/val/test split
+- Documented hyperparameters and batch size (32)
+- Note: Deterministic PyTorch/CUDA execution and global seeding are not enforced in code; enable `torch.use_deterministic_algorithms(True)` and set seeds if exact reproducibility is required.
+
+## Limitations
+
+1. Low precision (5.82%) requires manual review of flagged benign cases
+2. 32% melanoma misclassification rate despite optimisation
+3. Dataset predominantly fair-skinned; limited demographic generalisation
+4. Fixed triplet margin may not adapt to varying hardness across training
+
+## Future Work
+
+- Dynamic margin triplet loss or semi-hard mining for adaptive learning
+- Ensemble methods (Siamese + ViT/ConvNeXt) for feature fusion
+- Cost-sensitive hyperparameter optimisation beyond manual tuning
+- Cross-dataset evaluation (ISIC 2019, HAM10000) for robustness
+- Demographic stratification to reduce bias across skin tones
+- Uncertainty quantification for confidence-aware predictions
+
+
+## Acknowledgments
+
+This project acknowledges extensive use of large language models (LLMs) during initial development. While LLMs provided theoretical knowledge, they led the project into over-engineering, proposing complex architectures that resulted in training instability and failed convergence.
+
+After recognizing these pitfalls, the project pivoted to evidence-based prior work. The successful implementation in [shakes76/PatternAnalysis-2024/recognition/siamese-classifier-47044232](https://github.com/shakes76/PatternAnalysis-2024/tree/41ec148ae335cf38b07b22a2dad19fbd0c307553/recognition/siamese-classifier-47044232) demonstrated that a straightforward two-stage Siamese network achieved strong results without unnecessary complexity. This implementation draws direct inspiration from that approach, validating that simple, well-executed methods often outperform speculative complexity in limited-data domains.
+
+**Key lesson:** LLMs are powerful knowledge synthesis tools but require critical evaluation. Building upon proven implementations from the research community remains superior to pursuing untested suggestions from AI assistants.
+
 
 ## References
 
-[11] Koch, G., Zemel, R., & Salakhutdinov, R. (2015). Siamese neural networks for one-shot image recognition. *ICML deep learning workshop*, Vol. 2.
+Chandra, S. (2024). PatternAnalysis-2024: Recognition Examples. GitHub Repository. [shakes76/PatternAnalysis-2024/recognition/siamese-classifier-47044232](https://github.com/shakes76/PatternAnalysis-2024/tree/41ec148ae335cf38b07b22a2dad19fbd0c307553/recognition/siamese-classifier-47044232)
+
+Koch, G., Zemel, R., & Salakhutdinov, R. (2015). Siamese Neural Networks for One-Shot Image Recognition. ICML Deep Learning Workshop.
+
+Schroff, F., Kalenichenko, D., & Hinton, G. (2015). FaceNet: A Unified Embedding for Face Recognition and Clustering. CVPR.
+
+Codella, N. C. et al. (2019). Skin Lesion Analysis Toward Melanoma Detection 2018. arXiv:1902.03368.
+
+Rotemberg, V. et al. (2021). ISIC 2020 Challenge Dataset. International Skin Imaging Collaboration.

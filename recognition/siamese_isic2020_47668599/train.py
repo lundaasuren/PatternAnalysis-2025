@@ -1,7 +1,7 @@
 """
 Two-stage training script for Siamese Network + Binary Classifier on ISIC 2020.
 Stage 1: Siamese network with triplet loss (180 epochs)
-Stage 2: Binary classifier on frozen features (140 epochs)
+Stage 2: Binary classifier on frozen features (140 epochs) with weighted loss
 """
 
 import os
@@ -10,7 +10,7 @@ import matplotlib.pyplot as plt
 import torch
 from torch.nn import TripletMarginLoss, CrossEntropyLoss
 from torch.optim import Adam
-from sklearn.metrics import accuracy_score, confusion_matrix, ConfusionMatrixDisplay
+from sklearn.metrics import confusion_matrix, ConfusionMatrixDisplay
 from dataset import get_dataloaders
 from modules import SiameseNetwork, BinaryClassifier
 
@@ -37,16 +37,13 @@ def generate_loss_plot(train_loss, val_loss, output_dir, filename, title):
 
 
 def extract_features(siamese, loader, device):
-    """Extract features from all images in a dataloader."""
     siamese.eval()
     all_features, all_labels = [], []
-    
     with torch.no_grad():
         for anchor, _, _, label in loader:
             features = siamese.forward_once(anchor.to(device))
             all_features.append(features)
             all_labels.append(label.to(device))
-    
     return all_features, all_labels
 
 
@@ -60,18 +57,16 @@ def train(
     classifier_lr: float = 5e-4,
     margin: float = 1.0,
     batch_size: int = 32,
-    num_workers: int = 4
+    num_workers: int = 4,
+    classifier_weight: float = 10.0
 ):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     os.makedirs(output_dir, exist_ok=True)
     
-    print("=" * 70)
     print("TWO-STAGE TRAINING: SIAMESE + BINARY CLASSIFIER")
-    print("=" * 70)
     print(f"Device: {device}")
     print(f"Stage 1 - Siamese: {siamese_epochs} epochs, LR={siamese_lr}")
-    print(f"Stage 2 - Classifier: {classifier_epochs} epochs, LR={classifier_lr}")
-    print("=" * 70)
+    print(f"Stage 2 - Classifier: {classifier_epochs} epochs, LR={classifier_lr}, Weight={classifier_weight}")
     
     train_loader, val_loader, test_loader = get_dataloaders(
         metadata_path=metadata_path,
@@ -79,13 +74,6 @@ def train(
         batch_size=batch_size,
         num_workers=num_workers
     )
-    
-    # ========================================================================
-    # STAGE 1: TRAIN SIAMESE NETWORK WITH TRIPLET LOSS
-    # ========================================================================
-    print("\n" + "=" * 70)
-    print("STAGE 1: TRAINING SIAMESE NETWORK")
-    print("=" * 70)
     
     siamese = SiameseNetwork().to(device)
     tripletloss = TripletMarginLoss(margin=margin)
@@ -133,27 +121,16 @@ def train(
     print(f"\nStage 1 Complete: {siamese_time:.2f} min")
     print(f"Best Siamese Val Loss: {best_siamese_val_loss:.4f}")
     
-    # ========================================================================
-    # STAGE 2: TRAIN BINARY CLASSIFIER ON FROZEN SIAMESE FEATURES
-    # ========================================================================
-    print("\n" + "=" * 70)
-    print("STAGE 2: EXTRACTING FEATURES & TRAINING CLASSIFIER")
-    print("=" * 70)
-    
-    # Load best Siamese model
     siamese.load_state_dict(torch.load(os.path.join(output_dir, 'best_siamese.pth')))
     siamese.eval()
     
-    # Extract features from all sets
-    print("Extracting features...")
     train_features, train_labels = extract_features(siamese, train_loader, device)
     val_features, val_labels = extract_features(siamese, val_loader, device)
     test_features, test_labels = extract_features(siamese, test_loader, device)
-    print(f"✓ Features extracted from {len(train_features)} train batches")
     
-    # Train binary classifier
     classifier = BinaryClassifier().to(device)
-    ce_loss = CrossEntropyLoss()
+    class_weights = torch.tensor([1.0, classifier_weight]).to(device)
+    ce_loss = CrossEntropyLoss(weight=class_weights)
     classifier_optimizer = Adam(classifier.parameters(), lr=classifier_lr)
     
     classifier_train_loss, classifier_val_loss = [], []
@@ -195,17 +172,10 @@ def train(
     classifier_time = (time.time() - classifier_start) / 60
     torch.save(classifier.state_dict(), os.path.join(output_dir, 'final_classifier.pth'))
     generate_loss_plot(classifier_train_loss, classifier_val_loss, output_dir, 
-                       'classifier_loss.png', 'Binary Classifier - CrossEntropy Loss')
+                       'classifier_loss.png', 'Binary Classifier - Weighted CrossEntropy Loss')
     
     print(f"\nStage 2 Complete: {classifier_time:.2f} min")
     print(f"Best Classifier Val Loss: {best_classifier_val_loss:.4f}")
-    
-    # ========================================================================
-    # FINAL EVALUATION ON TEST SET
-    # ========================================================================
-    print("\n" + "=" * 70)
-    print("FINAL EVALUATION ON TEST SET")
-    print("=" * 70)
     
     classifier.load_state_dict(torch.load(os.path.join(output_dir, 'best_classifier.pth')))
     classifier.eval()
@@ -224,7 +194,6 @@ def train(
     
     accuracy = 100 * correct / total
     
-    # Generate confusion matrix
     cm = confusion_matrix(all_labels, all_predictions)
     disp = ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=['Benign', 'Malignant'])
     disp.plot(cmap='Blues', colorbar=False)
@@ -233,36 +202,16 @@ def train(
     plt.savefig(os.path.join(output_dir, 'confusion_matrix.png'), dpi=300, bbox_inches='tight')
     plt.close()
     
-    # Calculate sensitivity and specificity
     tn, fp, fn, tp = cm.ravel()
     sensitivity = 100 * tp / (tp + fn) if (tp + fn) > 0 else 0
     specificity = 100 * tn / (tn + fp) if (tn + fp) > 0 else 0
+    precision = 100 * tp / (tp + fp) if (tp + fp) > 0 else 0
     
-    # Final summary
     total_time = siamese_time + classifier_time
     
-    print("\n" + "=" * 70)
-    print("TRAINING SUMMARY")
-    print("=" * 70)
-    print(f"Stage 1 - Siamese Network:")
-    print(f"  Training Time: {siamese_time:.2f} min")
-    print(f"  Best Val Loss: {best_siamese_val_loss:.4f}")
-    print(f"\nStage 2 - Binary Classifier:")
-    print(f"  Training Time: {classifier_time:.2f} min")
-    print(f"  Best Val Loss: {best_classifier_val_loss:.4f}")
-    print(f"\nFinal Test Results:")
-    print(f"  Accuracy: {accuracy:.2f}%")
-    print(f"  Sensitivity (Recall): {sensitivity:.2f}%")
-    print(f"  Specificity: {specificity:.2f}%")
-    print(f"\nTotal Training Time: {total_time:.2f} min")
-    print(f"Output Directory: {output_dir}")
-    print("=" * 70)
     
-    # Save summary to file
     with open(os.path.join(output_dir, 'training_summary.txt'), 'w') as f:
-        f.write("=" * 70 + "\n")
         f.write("TRAINING SUMMARY\n")
-        f.write("=" * 70 + "\n")
         f.write(f"Stage 1 - Siamese Network:\n")
         f.write(f"  Epochs: {siamese_epochs}\n")
         f.write(f"  Learning Rate: {siamese_lr}\n")
@@ -271,17 +220,16 @@ def train(
         f.write(f"\nStage 2 - Binary Classifier:\n")
         f.write(f"  Epochs: {classifier_epochs}\n")
         f.write(f"  Learning Rate: {classifier_lr}\n")
+        f.write(f"  Class Weight: {classifier_weight}\n")
         f.write(f"  Training Time: {classifier_time:.2f} min\n")
         f.write(f"  Best Val Loss: {best_classifier_val_loss:.4f}\n")
         f.write(f"\nFinal Test Results:\n")
         f.write(f"  Accuracy: {accuracy:.2f}%\n")
         f.write(f"  Sensitivity: {sensitivity:.2f}%\n")
         f.write(f"  Specificity: {specificity:.2f}%\n")
-        f.write(f"  Confusion Matrix:\n")
-        f.write(f"    TN={tn}, FP={fp}\n")
-        f.write(f"    FN={fn}, TP={tp}\n")
+        f.write(f"  Precision: {precision:.2f}%\n")
+        f.write(f"  Confusion Matrix: TP={tp}, FP={fp}, FN={fn}, TN={tn}\n")
         f.write(f"\nTotal Training Time: {total_time:.2f} min\n")
-        f.write("=" * 70 + "\n")
 
 
 if __name__ == "__main__":
@@ -295,5 +243,6 @@ if __name__ == "__main__":
         classifier_lr=5e-4,
         margin=1.0,
         batch_size=32,
-        num_workers=4
+        num_workers=4,
+        classifier_weight=10.0
     )

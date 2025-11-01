@@ -1,0 +1,25 @@
+======================================================================
+WEIGHTED LOSS CLASSIFIER TRAINING SUMMARY
+======================================================================
+Binary Classifier Configuration:
+  Epochs: 140
+  Learning Rate: 0.0005
+  Training Time: 0.18 min
+  Best Val Loss: 0.5607
+  Class Weights: [Benign=1.00, Malignant=10.00]
+
+Test Set Results:
+  Total Samples: 4969
+  Correct Predictions: 3986
+
+Performance Metrics:
+  Accuracy:    80.22%
+  Precision:   0.0582
+  Sensitivity: 67.82%
+  Specificity: 80.44%
+  F1-Score:    0.1072
+
+Confusion Matrix:
+  TN=3927, FP=955
+  FN=28, TP=59
+======================================================================

@@ -1,0 +1,24 @@
+======================================================================
+TEST SET RESULTS
+======================================================================
+Total Samples: 4969
+Correct Predictions: 3986
+
+Performance Metrics:
+  Accuracy:    80.22%
+  Precision:   0.0582
+  Sensitivity: 0.6782
+  Specificity: 0.8044
+  F1-Score:    0.1072
+
+======================================================================
+
+Detailed Classification Report:
+              precision    recall  f1-score   support
+
+      Benign     0.9929    0.8044    0.8888      4882
+   Malignant     0.0582    0.6782    0.1072        87
+
+    accuracy                         0.8022      4969
+   macro avg     0.5256    0.7413    0.4980      4969
+weighted avg     0.9766    0.8022    0.8751      4969

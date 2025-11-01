@@ -1,0 +1,25 @@
+======================================================================
+TRAINING SUMMARY
+======================================================================
+Stage 1 - Siamese Network:
+  Epochs: 180
+  Learning Rate: 0.0001
+  Training Time: 121.47 min
+  Best Val Loss: 0.7183
+
+Stage 2 - Binary Classifier:
+  Epochs: 140
+  Learning Rate: 0.0005
+  Training Time: 0.18 min
+  Best Val Loss: 0.2869
+
+Final Test Results:
+  Accuracy: 89.07%
+  Sensitivity: 43.68%
+  Specificity: 89.88%
+  Confusion Matrix:
+    TN=4388, FP=494
+    FN=49, TP=38
+
+Total Training Time: 121.65 min
+======================================================================
